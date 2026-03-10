@@ -1,8 +1,11 @@
 """
 Claxon Controller GUI — tkinter интерфейс для управления 6 клаксонами.
+Управление реальной длительностью звука (20-100 мс) через обратную связь пьезо.
 Требует: pip install zeroconf
 """
 
+import json
+import os
 import socket
 import threading
 import tkinter as tk
@@ -10,8 +13,22 @@ from tkinter import ttk
 from zeroconf import Zeroconf, ServiceBrowser, ServiceListener
 
 UDP_PORT = 5000
-RECV_TIMEOUT = 0.5
+RECV_TIMEOUT = 1.0  # увеличен — ESP ждёт звук + замер
 NUM_CLAXONS = 6
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+
+
+def load_settings() -> dict:
+    try:
+        with open(SETTINGS_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_settings(settings: dict):
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(settings, f, indent=2)
 
 
 class ClaxonDevice:
@@ -57,21 +74,52 @@ def send_command(device: ClaxonDevice, command: str) -> str | None:
         sock.close()
 
 
-def fire(device: ClaxonDevice, duration_ms: int) -> tuple[bool, int]:
-    cmd = f"FIRE:{duration_ms}" if duration_ms != 100 else "FIRE"
+def set_threshold(device: ClaxonDevice, threshold: int) -> bool:
+    """Устанавливает порог пьезо на ESP."""
+    reply = send_command(device, f"THRESH:{threshold}")
+    return reply is not None and reply.startswith("THRESH:")
+
+
+def fire(device: ClaxonDevice, duration_ms: int) -> dict:
+    """
+    Даёт сигнал клаксону.
+    Возвращает dict с результатом:
+      success, piezo, startup_delay, actual_sound_ms, error
+    """
+    cmd = f"FIRE:{duration_ms}"
     reply = send_command(device, cmd)
-    if reply and reply.startswith("OK:"):
-        piezo = int(reply.split(":")[1])
-        return True, piezo
-    return False, 0
+    if not reply:
+        return {"success": False, "error": "no_response"}
+
+    if reply.startswith("OK:"):
+        # OK:piezo:startup_delay:actual_sound_ms
+        parts = reply.split(":")
+        return {
+            "success": True,
+            "piezo": int(parts[1]),
+            "startup_delay": int(parts[2]),
+            "actual_sound_ms": int(parts[3]),
+        }
+
+    if reply.startswith("FAIL:"):
+        # FAIL:no_sound:piezo
+        parts = reply.split(":")
+        return {
+            "success": False,
+            "error": parts[1],
+            "piezo": int(parts[2]) if len(parts) > 2 else 0,
+        }
+
+    return {"success": False, "error": "unknown"}
 
 
 class ClaxonPanel(tk.Frame):
     """Панель одного клаксона."""
 
-    def __init__(self, parent, index: int):
+    def __init__(self, parent, index: int, app: "ClaxonApp"):
         super().__init__(parent, relief=tk.GROOVE, borderwidth=2, padx=10, pady=8)
         self.index = index
+        self.app = app
         self.device: ClaxonDevice | None = None
 
         # Заголовок
@@ -86,17 +134,31 @@ class ClaxonPanel(tk.Frame):
         self.status_label = tk.Label(header, textvariable=self.status_var, font=("Arial", 10))
         self.status_label.pack(side=tk.RIGHT)
 
-        # Длительность
+        # Длительность звука
         dur_frame = tk.Frame(self)
         dur_frame.pack(fill=tk.X, pady=(6, 0))
 
-        tk.Label(dur_frame, text="ms:").pack(side=tk.LEFT)
-        self.duration_var = tk.IntVar(value=100)
+        tk.Label(dur_frame, text="Sound ms:").pack(side=tk.LEFT)
+        self.duration_var = tk.IntVar(value=50)
         self.duration_scale = tk.Scale(
-            dur_frame, from_=50, to=500, orient=tk.HORIZONTAL,
-            variable=self.duration_var, length=180, showvalue=True
+            dur_frame, from_=20, to=100, orient=tk.HORIZONTAL,
+            variable=self.duration_var, length=160, showvalue=True
         )
         self.duration_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # Порог пьезо
+        thresh_frame = tk.Frame(self)
+        thresh_frame.pack(fill=tk.X, pady=(4, 0))
+
+        tk.Label(thresh_frame, text="Threshold:").pack(side=tk.LEFT)
+        self.threshold_var = tk.IntVar(value=50)
+        self.threshold_spin = tk.Spinbox(
+            thresh_frame, from_=1, to=1023, increment=10,
+            textvariable=self.threshold_var, width=5
+        )
+        self.threshold_spin.pack(side=tk.LEFT, padx=4)
+        self.thresh_btn = tk.Button(thresh_frame, text="Set", command=self.on_set_threshold)
+        self.thresh_btn.pack(side=tk.LEFT)
 
         # Кнопка FIRE
         self.fire_btn = tk.Button(
@@ -106,9 +168,12 @@ class ClaxonPanel(tk.Frame):
         )
         self.fire_btn.pack(fill=tk.X, pady=(6, 0))
 
-        # Обратная связь
+        # Обратная связь — 2 строки
         self.feedback_var = tk.StringVar(value="")
         tk.Label(self, textvariable=self.feedback_var, font=("Arial", 10)).pack(anchor=tk.W, pady=(4, 0))
+
+        self.detail_var = tk.StringVar(value="")
+        tk.Label(self, textvariable=self.detail_var, font=("Arial", 9), fg="gray").pack(anchor=tk.W)
 
         # Индикатор пьезо
         self.piezo_bar = ttk.Progressbar(self, maximum=1023, length=200)
@@ -116,14 +181,39 @@ class ClaxonPanel(tk.Frame):
 
         self.set_online(False)
 
+        # Загрузить сохранённые настройки
+        self.load_saved_settings()
+
+    def load_saved_settings(self):
+        key = f"claxon-{self.index + 1}"
+        saved = self.app.settings.get(key, {})
+        if "duration" in saved:
+            self.duration_var.set(saved["duration"])
+        if "threshold" in saved:
+            self.threshold_var.set(saved["threshold"])
+
+    def save_current_settings(self):
+        key = f"claxon-{self.index + 1}"
+        self.app.settings[key] = {
+            "duration": self.duration_var.get(),
+            "threshold": self.threshold_var.get(),
+        }
+        save_settings(self.app.settings)
+
     def set_device(self, device: ClaxonDevice | None):
         self.device = device
         if device:
             self.name_var.set(device.name)
             self.set_online(True)
+            # Отправляем сохранённый порог на ESP
+            threading.Thread(target=self._sync_threshold, daemon=True).start()
         else:
             self.name_var.set(f"claxon-{self.index + 1}")
             self.set_online(False)
+
+    def _sync_threshold(self):
+        if self.device:
+            set_threshold(self.device, self.threshold_var.get())
 
     def set_online(self, online: bool):
         if online:
@@ -136,33 +226,70 @@ class ClaxonPanel(tk.Frame):
             self.fire_btn.config(state=tk.DISABLED)
             self.piezo_bar["value"] = 0
             self.feedback_var.set("")
+            self.detail_var.set("")
+
+    def on_set_threshold(self):
+        self.save_current_settings()
+        if not self.device:
+            self.feedback_var.set(f"Threshold saved locally ({self.threshold_var.get()})")
+            return
+        self.thresh_btn.config(state=tk.DISABLED)
+        threading.Thread(target=self._set_threshold_thread, daemon=True).start()
+
+    def _set_threshold_thread(self):
+        ok = set_threshold(self.device, self.threshold_var.get())
+        self.after(0, self._set_threshold_done, ok)
+
+    def _set_threshold_done(self, ok: bool):
+        self.thresh_btn.config(state=tk.NORMAL)
+        if ok:
+            self.feedback_var.set(f"Threshold set to {self.threshold_var.get()}")
+        else:
+            self.feedback_var.set("Threshold: NO RESPONSE (saved locally)")
 
     def on_fire(self):
         if not self.device:
             return
         self.fire_btn.config(state=tk.DISABLED)
         self.feedback_var.set("...")
+        self.detail_var.set("")
         threading.Thread(target=self._fire_thread, daemon=True).start()
 
     def _fire_thread(self):
-        success, piezo = fire(self.device, self.duration_var.get())
-        self.after(0, self._fire_done, success, piezo)
+        result = fire(self.device, self.duration_var.get())
+        self.after(0, self._fire_done, result)
 
-    def _fire_done(self, success: bool, piezo: int):
+    def _fire_done(self, result: dict):
         self.fire_btn.config(state=tk.NORMAL)
-        if success:
+        self.save_current_settings()
+
+        if result["success"]:
+            piezo = result["piezo"]
+            delay = result["startup_delay"]
+            actual = result["actual_sound_ms"]
             self.piezo_bar["value"] = piezo
+
             if piezo < 50:
                 self.feedback_var.set("SILENT!")
             else:
-                self.feedback_var.set(f"sound OK (piezo={piezo})")
+                self.feedback_var.set(f"OK (piezo={piezo})")
+
+            self.detail_var.set(f"delay={delay}ms, sound={actual}ms")
         else:
-            self.feedback_var.set("NO RESPONSE")
-            self.piezo_bar["value"] = 0
+            error = result.get("error", "unknown")
+            self.piezo_bar["value"] = result.get("piezo", 0)
+            if error == "no_response":
+                self.feedback_var.set("NO RESPONSE")
+            elif error == "no_sound":
+                self.feedback_var.set("NO SOUND DETECTED")
+            else:
+                self.feedback_var.set(f"ERROR: {error}")
+            self.detail_var.set("")
 
 
 class ClaxonApp:
     def __init__(self):
+        self.settings = load_settings()
         self.root = tk.Tk()
         self.root.title("Claxon Controller")
         self.root.resizable(False, False)
@@ -179,8 +306,8 @@ class ClaxonApp:
 
         # Общая длительность
         tk.Label(top, text="All ms:").pack(side=tk.LEFT, padx=(20, 0))
-        self.global_duration = tk.IntVar(value=100)
-        global_spin = tk.Spinbox(top, from_=50, to=500, increment=10,
+        self.global_duration = tk.IntVar(value=50)
+        global_spin = tk.Spinbox(top, from_=20, to=100, increment=5,
                                  textvariable=self.global_duration, width=5)
         global_spin.pack(side=tk.LEFT, padx=4)
 
@@ -199,7 +326,7 @@ class ClaxonApp:
 
         self.panels: list[ClaxonPanel] = []
         for i in range(NUM_CLAXONS):
-            panel = ClaxonPanel(grid, i)
+            panel = ClaxonPanel(grid, i, self)
             row, col = divmod(i, 3)
             panel.grid(row=row, column=col, padx=4, pady=4, sticky="nsew")
             self.panels.append(panel)
@@ -218,7 +345,6 @@ class ClaxonApp:
         self.zc = Zeroconf()
         self.listener = ClaxonDiscovery(callback=self._on_devices_changed)
         ServiceBrowser(self.zc, "_claxon._udp.local.", self.listener)
-        # Обновить UI через 3 секунды
         self.root.after(3000, self._update_panels)
 
     def stop_discovery(self):
@@ -227,7 +353,6 @@ class ClaxonApp:
             self.zc = None
 
     def _on_devices_changed(self):
-        # Вызывается из потока zeroconf — планируем обновление в main thread
         self.root.after(100, self._update_panels)
 
     def _update_panels(self):
@@ -235,7 +360,6 @@ class ClaxonApp:
             return
 
         devices = self.listener.devices
-        # Сортируем по имени и раскладываем по панелям
         sorted_names = sorted(devices.keys())
 
         for i, panel in enumerate(self.panels):
@@ -243,7 +367,6 @@ class ClaxonApp:
             if expected in devices:
                 panel.set_device(devices[expected])
             elif i < len(sorted_names):
-                # Если имена не по порядку — заполняем что есть
                 panel.set_device(devices[sorted_names[i]])
             else:
                 panel.set_device(None)
