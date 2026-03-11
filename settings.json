@@ -1,0 +1,14 @@
+{
+  "claxon-1": {
+    "duration": 51,
+    "threshold": 70,
+    "cold_delay": 112,
+    "warm_delay": 95
+  },
+  "cal:\u041a\u043b\u0430\u043a\u0441\u043e\u043d\u044b.mid": [
+    115,
+    63,
+    92,
+    42
+  ]
+}
