@@ -161,11 +161,11 @@ void loop() {
 
 void handleCommand(const char* cmd) {
   if (strncmp(cmd, "FIRE", 4) == 0) {
-    // FIRE или FIRE:50 (желаемая длительность реального звука, 20-100 мс)
+    // FIRE или FIRE:50 (желаемая длительность реального звука, 20-1000 мс)
     soundDuration = DEFAULT_SOUND_MS;
     if (cmd[4] == ':') {
       unsigned long d = atol(cmd + 5);
-      if (d >= 20 && d <= 100) {
+      if (d >= 20 && d <= 1000) {
         soundDuration = d;
       }
     }

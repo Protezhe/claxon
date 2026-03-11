@@ -1,7 +1,7 @@
 """
 Claxon Controller GUI — tkinter интерфейс для управления 6 клаксонами.
-Управление реальной длительностью звука (20-100 мс) через обратную связь пьезо.
-Поддержка воспроизведения MIDI файлов.
+Управление реальной длительностью звука (20-1000 мс) через обратную связь пьезо.
+Поддержка воспроизведения MIDI файлов с калибровкой задержек.
 Требует: pip install zeroconf mido
 """
 
@@ -15,7 +15,7 @@ from tkinter import ttk, filedialog
 from zeroconf import Zeroconf, ServiceBrowser, ServiceListener
 
 UDP_PORT = 5000
-RECV_TIMEOUT = 1.0
+RECV_TIMEOUT = 2.0
 NUM_CLAXONS = 6
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 
@@ -152,7 +152,7 @@ class ClaxonPanel(tk.Frame):
         tk.Label(dur_frame, text="Sound ms:").pack(side=tk.LEFT)
         self.duration_var = tk.IntVar(value=50)
         self.duration_scale = tk.Scale(
-            dur_frame, from_=20, to=100, orient=tk.HORIZONTAL,
+            dur_frame, from_=20, to=1000, orient=tk.HORIZONTAL,
             variable=self.duration_var, length=160, showvalue=True
         )
         self.duration_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -313,6 +313,9 @@ class ClaxonApp:
 
         self.midi_playing = False
         self.midi_stop_event = threading.Event()
+        # Карта калибровки: список задержек для каждого события MIDI
+        # calibration_map[i] = startup_delay_ms для события i
+        self.calibration_map: list[int] = []
 
         # Верхняя панель
         top = tk.Frame(self.root, padx=10, pady=6)
@@ -327,7 +330,7 @@ class ClaxonApp:
         # Общая длительность
         tk.Label(top, text="All ms:").pack(side=tk.LEFT, padx=(20, 0))
         self.global_duration = tk.IntVar(value=50)
-        global_spin = tk.Spinbox(top, from_=20, to=100, increment=5,
+        global_spin = tk.Spinbox(top, from_=20, to=1000, increment=10,
                                  textvariable=self.global_duration, width=5)
         global_spin.pack(side=tk.LEFT, padx=4)
 
@@ -357,11 +360,12 @@ class ClaxonApp:
         self.midi_stop_btn = tk.Button(midi_frame, text="Stop", command=self.stop_midi, state=tk.DISABLED)
         self.midi_stop_btn.pack(side=tk.LEFT, padx=2)
 
+        tk.Button(midi_frame, text="Reset Cal", command=self.reset_calibration).pack(side=tk.LEFT, padx=6)
+
         self.midi_status_var = tk.StringVar(value="")
         tk.Label(midi_frame, textvariable=self.midi_status_var, font=("Arial", 9), fg="gray").pack(side=tk.LEFT, padx=6)
 
-        # C D E F G A
-        tk.Label(midi_frame, text="Notes: C D E F G A", font=("Arial", 9), fg="blue").pack(side=tk.RIGHT)
+        tk.Label(midi_frame, text="C D E F G A", font=("Arial", 9), fg="blue").pack(side=tk.RIGHT)
 
         # Сетка клаксонов 2x3
         grid = tk.Frame(self.root, padx=10, pady=6)
@@ -381,6 +385,7 @@ class ClaxonApp:
         self.zc: Zeroconf | None = None
         self.listener: ClaxonDiscovery | None = None
         self.midi_data = None
+        self.midi_filename = None  # имя текущего MIDI файла (для ключа калибровки)
         self.start_discovery()
 
     def start_discovery(self):
@@ -428,6 +433,15 @@ class ClaxonApp:
             if panel.device:
                 panel.on_fire()
 
+    # --- Calibration ---
+
+    def reset_calibration(self):
+        self.calibration_map = []
+        if self.midi_filename:
+            self.settings.pop(f"cal:{self.midi_filename}", None)
+            save_settings(self.settings)
+        self.midi_status_var.set("Calibration reset")
+
     # --- MIDI ---
 
     def load_midi(self):
@@ -464,7 +478,7 @@ class ClaxonApp:
                     if msg.note in note_on_times and note_class in NOTE_TO_CLAXON:
                         start = note_on_times.pop(msg.note)
                         dur_ms = int((abs_time - start) * 1000)
-                        dur_ms = max(20, min(100, dur_ms))
+                        dur_ms = max(20, min(1000, dur_ms))
                         claxon_idx = NOTE_TO_CLAXON[note_class]
                         events.append((start, claxon_idx, dur_ms))
 
@@ -472,12 +486,22 @@ class ClaxonApp:
         self.midi_data = events
 
         filename = os.path.basename(path)
+        self.midi_filename = filename
+
+        # Загружаем калибровку из settings если есть и совпадает количество событий
+        cal_key = f"cal:{filename}"
+        saved_cal = self.settings.get(cal_key, [])
+        if isinstance(saved_cal, list) and len(saved_cal) == len(events):
+            self.calibration_map = saved_cal
+        else:
+            self.calibration_map = []
+
         self.midi_file_var.set(filename)
-        self.midi_status_var.set(f"{len(events)} notes")
+        cal_info = f", cal loaded" if self.calibration_map else ""
+        self.midi_status_var.set(f"{len(events)} notes{cal_info}")
         self.midi_play_btn.config(state=tk.NORMAL)
 
     def _get_tempo(self, mid):
-        """Получает темп из MIDI файла."""
         import mido
         for track in mid.tracks:
             for msg in track:
@@ -499,32 +523,78 @@ class ClaxonApp:
         self.midi_stop_event.set()
 
     def _midi_playback_thread(self):
+        """Воспроизведение MIDI с компенсацией и постоянной подстройкой карты.
+        1-й прогон (нет карты): без компенсации, замеряет задержки → создаёт карту.
+        Следующие прогоны: компенсирует по карте, замеряет остаток, корректирует."""
         events = self.midi_data
         start_time = time.time()
+        has_cal = len(self.calibration_map) == len(events)
+        cal_map = list(self.calibration_map) if has_cal else []
 
         for i, (event_time, claxon_idx, dur_ms) in enumerate(events):
             if self.midi_stop_event.is_set():
+                if not has_cal:
+                    cal_map.extend([-1] * (len(events) - i))
                 break
 
-            # Ждём нужный момент
-            target = start_time + event_time
+            panel = self.panels[claxon_idx]
+
+            # Компенсация из карты (0 если нет карты)
+            compensation_ms = 0
+            if has_cal and cal_map[i] >= 0:
+                compensation_ms = cal_map[i]
+
+            fire_time = event_time - (compensation_ms / 1000.0)
+            target = start_time + fire_time
             now = time.time()
             if target > now:
                 wait = target - now
                 if self.midi_stop_event.wait(timeout=wait):
+                    if not has_cal:
+                        cal_map.extend([-1] * (len(events) - i))
                     break
 
-            # Отправляем FIRE
-            panel = self.panels[claxon_idx]
-            if panel.device:
-                fire_async(panel.device, dur_ms)
+            if not panel.device:
+                if not has_cal:
+                    cal_map.append(-1)
+                continue
 
-            # Подсветка в GUI
+            # FIRE с ожиданием ответа — получаем startup_delay
+            result = fire(panel.device, dur_ms)
+            if result["success"]:
+                measured = result["startup_delay"]
+                if has_cal:
+                    # Ошибка = measured - comp (>0 опоздал, <0 раньше)
+                    # Новая компенсация = comp + ошибка = measured
+                    # Сглаживание: comp + 0.5 * ошибка (чтобы не прыгать)
+                    residual = measured - compensation_ms
+                    cal_map[i] = compensation_ms + residual // 2
+                else:
+                    cal_map.append(measured)
+            else:
+                if not has_cal:
+                    cal_map.append(-1)
+
+            # Подсветка и статус
             self.root.after(0, panel.flash)
-            self.root.after(0, lambda idx=i: self.midi_status_var.set(
-                f"Playing... {idx + 1}/{len(events)}"
-            ))
+            if has_cal:
+                new_val = cal_map[i]
+                delta = new_val - compensation_ms
+                sign = "+" if delta >= 0 else ""
+                self.root.after(0, lambda idx=i, c=new_val, s=sign, d=delta: self.midi_status_var.set(
+                    f"Playing {idx + 1}/{len(events)} (comp={c}ms, {s}{d}ms)"
+                ))
+            else:
+                delay_str = f"{cal_map[-1]}ms" if cal_map[-1] >= 0 else "fail"
+                self.root.after(0, lambda idx=i, d=delay_str: self.midi_status_var.set(
+                    f"Playing {idx + 1}/{len(events)} (delay={d})"
+                ))
 
+        self.calibration_map = cal_map
+        # Сохраняем карту калибровки в settings.json
+        if self.midi_filename:
+            self.settings[f"cal:{self.midi_filename}"] = cal_map
+            save_settings(self.settings)
         self.root.after(0, self._midi_playback_done)
 
     def _midi_playback_done(self):
@@ -534,7 +604,8 @@ class ClaxonApp:
         if self.midi_stop_event.is_set():
             self.midi_status_var.set("Stopped")
         else:
-            self.midi_status_var.set("Done")
+            mapped = sum(1 for d in self.calibration_map if d >= 0)
+            self.midi_status_var.set(f"Done ({mapped} notes calibrated)")
 
     def run(self):
         try:
