@@ -95,6 +95,11 @@ def set_threshold(device: ClaxonDevice, threshold: int) -> bool:
     return reply is not None and reply.startswith("THRESH:")
 
 
+def set_power(device: ClaxonDevice, power: float) -> bool:
+    reply = send_command(device, f"POWER:{power:.1f}")
+    return reply is not None and reply.startswith("POWER:")
+
+
 def fire(device: ClaxonDevice, duration_ms: int) -> dict:
     cmd = f"FIRE:{duration_ms}"
     reply = send_command(device, cmd)
@@ -171,6 +176,21 @@ class ClaxonPanel(tk.Frame):
         self.thresh_btn = tk.Button(thresh_frame, text="Set", command=self.on_set_threshold)
         self.thresh_btn.pack(side=tk.LEFT)
 
+        # Мощность ШИМ
+        pwr_frame = tk.Frame(self)
+        pwr_frame.pack(fill=tk.X, pady=(4, 0))
+
+        tk.Label(pwr_frame, text="Power %:").pack(side=tk.LEFT)
+        self.power_var = tk.DoubleVar(value=100.0)
+        self.power_scale = tk.Scale(
+            pwr_frame, from_=80, to=100, orient=tk.HORIZONTAL,
+            variable=self.power_var, length=200, showvalue=True,
+            resolution=0.1, digits=4
+        )
+        self.power_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.power_btn = tk.Button(pwr_frame, text="Set", command=self.on_set_power)
+        self.power_btn.pack(side=tk.LEFT, padx=4)
+
         # Кнопка FIRE
         self.fire_btn = tk.Button(
             self, text="FIRE", font=("Arial", 16, "bold"),
@@ -200,12 +220,15 @@ class ClaxonPanel(tk.Frame):
             self.duration_var.set(saved["duration"])
         if "threshold" in saved:
             self.threshold_var.set(saved["threshold"])
+        if "power" in saved:
+            self.power_var.set(saved["power"])
 
     def save_current_settings(self):
         key = f"claxon-{self.index + 1}"
         self.app.settings[key] = {
             "duration": self.duration_var.get(),
             "threshold": self.threshold_var.get(),
+            "power": self.power_var.get(),
         }
         save_settings(self.app.settings)
 
@@ -222,6 +245,7 @@ class ClaxonPanel(tk.Frame):
     def _sync_threshold(self):
         if self.device:
             set_threshold(self.device, self.threshold_var.get())
+            set_power(self.device, self.power_var.get())
 
     def set_online(self, online: bool):
         if online:
@@ -254,6 +278,25 @@ class ClaxonPanel(tk.Frame):
             self.feedback_var.set(f"Threshold set to {self.threshold_var.get()}")
         else:
             self.feedback_var.set("Threshold: NO RESPONSE (saved locally)")
+
+    def on_set_power(self):
+        self.save_current_settings()
+        if not self.device:
+            self.feedback_var.set(f"Power saved locally ({self.power_var.get()}%)")
+            return
+        self.power_btn.config(state=tk.DISABLED)
+        threading.Thread(target=self._set_power_thread, daemon=True).start()
+
+    def _set_power_thread(self):
+        ok = set_power(self.device, self.power_var.get())
+        self.after(0, self._set_power_done, ok)
+
+    def _set_power_done(self, ok: bool):
+        self.power_btn.config(state=tk.NORMAL)
+        if ok:
+            self.feedback_var.set(f"Power set to {self.power_var.get()}%")
+        else:
+            self.feedback_var.set("Power: NO RESPONSE (saved locally)")
 
     def on_fire(self):
         if not self.device:
@@ -388,6 +431,11 @@ class ClaxonApp:
         self.midi_filename = None  # имя текущего MIDI файла (для ключа калибровки)
         self.start_discovery()
 
+        # Автозагрузка последнего MIDI файла
+        last_midi = self.settings.get("last_midi")
+        if last_midi and os.path.isfile(last_midi):
+            self._load_midi_file(last_midi)
+
     def start_discovery(self):
         self.stop_discovery()
         self.info_var.set("Scanning...")
@@ -451,7 +499,9 @@ class ClaxonApp:
         )
         if not path:
             return
+        self._load_midi_file(path)
 
+    def _load_midi_file(self, path: str):
         try:
             import mido
             mid = mido.MidiFile(path)
@@ -487,6 +537,10 @@ class ClaxonApp:
 
         filename = os.path.basename(path)
         self.midi_filename = filename
+
+        # Сохраняем путь к MIDI в settings
+        self.settings["last_midi"] = path
+        save_settings(self.settings)
 
         # Загружаем калибровку из settings если есть и совпадает количество событий
         cal_key = f"cal:{filename}"

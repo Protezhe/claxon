@@ -38,6 +38,7 @@ char packetBuf[64];
 
 HornState state = IDLE;
 int piezoThreshold = DEFAULT_THRESHOLD;  // текущий порог (настраивается по UDP)
+int hornPwm = 1023;                      // значение ШИМ 0-1023
 unsigned long hornOnTime = 0;      // когда включили транзистор
 unsigned long soundStartTime = 0;  // когда пьезо зафиксировал звук
 unsigned long soundStopTime = 0;   // когда выключили транзистор
@@ -176,7 +177,7 @@ void handleCommand(const char* cmd) {
     actualSoundMs = 0;
     hornOnTime = millis();
     state = WAITING_SOUND;
-    digitalWrite(HORN_PIN, HIGH);
+    analogWrite(HORN_PIN, hornPwm);
 
     Serial.printf("Horn ON, target sound: %lu ms\n", soundDuration);
 
@@ -194,6 +195,18 @@ void handleCommand(const char* cmd) {
       snprintf(reply, sizeof(reply), "THRESH:%d", piezoThreshold);
       sendReply(reply);
       Serial.printf("Threshold set to %d\n", piezoThreshold);
+    }
+
+  } else if (strncmp(cmd, "POWER:", 6) == 0) {
+    // POWER:процент (дробный, например 95.5) → ШИМ 0-1023
+    float p = atof(cmd + 6);
+    if (p >= 1.0 && p <= 100.0) {
+      hornPwm = (int)(p * 1023.0 / 100.0 + 0.5);
+      if (hornPwm > 1023) hornPwm = 1023;
+      char reply[32];
+      snprintf(reply, sizeof(reply), "POWER:%d", hornPwm);
+      sendReply(reply);
+      Serial.printf("Power %.1f%% (PWM=%d)\n", p, hornPwm);
     }
 
   } else if (strcmp(cmd, "STATUS") == 0) {

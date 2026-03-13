@@ -1,12 +1,14 @@
 {
   "claxon-1": {
     "duration": 51,
-    "threshold": 70
+    "threshold": 70,
+    "power": 97
   },
   "cal:\u041a\u043b\u0430\u043a\u0441\u043e\u043d\u044b.mid": [
     115,
     63,
     92,
     42
-  ]
+  ],
+  "last_midi": "/Users/evgeniy/Music/Logic/\u041a\u043b\u0430\u043a\u0441\u043e\u043d\u044b/\u041a\u043b\u0430\u043a\u0441\u043e\u043d\u044b.mid"
 }
