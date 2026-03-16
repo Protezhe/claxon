@@ -200,7 +200,7 @@ void handleCommand(const char* cmd) {
   } else if (strncmp(cmd, "POWER:", 6) == 0) {
     // POWER:процент (дробный, например 95.5) → ШИМ 0-1023
     float p = atof(cmd + 6);
-    if (p >= 1.0 && p <= 100.0) {
+    if (p >= 0.0 && p <= 100.0) {
       hornPwm = (int)(p * 1023.0 / 100.0 + 0.5);
       if (hornPwm > 1023) hornPwm = 1023;
       char reply[32];

@@ -183,7 +183,7 @@ class ClaxonPanel(tk.Frame):
         tk.Label(pwr_frame, text="Power %:").pack(side=tk.LEFT)
         self.power_var = tk.DoubleVar(value=100.0)
         self.power_scale = tk.Scale(
-            pwr_frame, from_=80, to=100, orient=tk.HORIZONTAL,
+            pwr_frame, from_=0, to=100, orient=tk.HORIZONTAL,
             variable=self.power_var, length=200, showvalue=True,
             resolution=0.1, digits=4
         )
