@@ -1,5 +1,6 @@
 """
-Claxon Controller GUI — tkinter интерфейс для управления 6 клаксонами.
+Claxon Controller GUI — tkinter интерфейс для управления 8 клаксонами.
+4 ESP × 2 канала = 8 клаксонов.
 Управление реальной длительностью звука (20-1000 мс) через обратную связь пьезо.
 Поддержка воспроизведения MIDI файлов с калибровкой задержек.
 Требует: pip install zeroconf mido
@@ -16,12 +17,14 @@ from zeroconf import Zeroconf, ServiceBrowser, ServiceListener
 
 UDP_PORT = 5000
 RECV_TIMEOUT = 2.0
-NUM_CLAXONS = 6
+NUM_ESPS = 4
+CHANNELS_PER_ESP = 2
+NUM_CLAXONS = NUM_ESPS * CHANNELS_PER_ESP  # 8
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 
 # Маппинг MIDI нот на клаксоны (любая октава)
-# C=0, D=1, E=2, F=3, G=4, A=5
-NOTE_TO_CLAXON = {0: 0, 2: 1, 4: 2, 5: 3, 7: 4, 9: 5}
+# C=0, C#=1, D=2, D#=3, E=4, F=5, F#=6, G=7
+NOTE_TO_CLAXON = {0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7}
 
 
 def load_settings() -> dict:
@@ -37,7 +40,8 @@ def save_settings(settings: dict):
         json.dump(settings, f, indent=2)
 
 
-class ClaxonDevice:
+class EspDevice:
+    """Одна ESP с 2 каналами клаксонов."""
     def __init__(self, name: str, ip: str, port: int):
         self.name = name
         self.ip = ip
@@ -46,7 +50,7 @@ class ClaxonDevice:
 
 class ClaxonDiscovery(ServiceListener):
     def __init__(self, callback):
-        self.devices: dict[str, ClaxonDevice] = {}
+        self.devices: dict[str, EspDevice] = {}
         self.callback = callback
 
     def update_service(self, zc, type_, name):
@@ -63,15 +67,15 @@ class ClaxonDiscovery(ServiceListener):
             ip = socket.inet_ntoa(info.addresses[0])
             port = info.port
             short_name = name.split(".")[0]
-            self.devices[short_name] = ClaxonDevice(short_name, ip, port)
+            self.devices[short_name] = EspDevice(short_name, ip, port)
             self.callback()
 
 
-def send_command(device: ClaxonDevice, command: str) -> str | None:
+def send_command(esp: EspDevice, command: str) -> str | None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(RECV_TIMEOUT)
     try:
-        sock.sendto(command.encode(), (device.ip, device.port))
+        sock.sendto(command.encode(), (esp.ip, esp.port))
         data, _ = sock.recvfrom(256)
         return data.decode()
     except socket.timeout:
@@ -80,47 +84,49 @@ def send_command(device: ClaxonDevice, command: str) -> str | None:
         sock.close()
 
 
-def fire_async(device: ClaxonDevice, duration_ms: int):
+def fire_async(esp: EspDevice, channel: int, duration_ms: int):
     """Отправляет FIRE без ожидания ответа (для MIDI playback)."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        cmd = f"FIRE:{duration_ms}"
-        sock.sendto(cmd.encode(), (device.ip, device.port))
+        cmd = f"FIRE:{channel}:{duration_ms}"
+        sock.sendto(cmd.encode(), (esp.ip, esp.port))
     finally:
         sock.close()
 
 
-def set_threshold(device: ClaxonDevice, threshold: int) -> bool:
-    reply = send_command(device, f"THRESH:{threshold}")
+def set_threshold(esp: EspDevice, channel: int, threshold: int) -> bool:
+    reply = send_command(esp, f"THRESH:{channel}:{threshold}")
     return reply is not None and reply.startswith("THRESH:")
 
 
-def set_power(device: ClaxonDevice, power: float) -> bool:
-    reply = send_command(device, f"POWER:{power:.1f}")
+def set_power(esp: EspDevice, channel: int, power: float) -> bool:
+    reply = send_command(esp, f"POWER:{channel}:{power:.1f}")
     return reply is not None and reply.startswith("POWER:")
 
 
-def fire(device: ClaxonDevice, duration_ms: int) -> dict:
-    cmd = f"FIRE:{duration_ms}"
-    reply = send_command(device, cmd)
+def fire(esp: EspDevice, channel: int, duration_ms: int) -> dict:
+    cmd = f"FIRE:{channel}:{duration_ms}"
+    reply = send_command(esp, cmd)
     if not reply:
         return {"success": False, "error": "no_response"}
 
     if reply.startswith("OK:"):
         parts = reply.split(":")
+        # OK:ch:piezo:delay:sound_ms
         return {
             "success": True,
-            "piezo": int(parts[1]),
-            "startup_delay": int(parts[2]),
-            "actual_sound_ms": int(parts[3]),
+            "piezo": int(parts[2]),
+            "startup_delay": int(parts[3]),
+            "actual_sound_ms": int(parts[4]),
         }
 
     if reply.startswith("FAIL:"):
         parts = reply.split(":")
+        # FAIL:ch:reason[:piezo]
         return {
             "success": False,
-            "error": parts[1],
-            "piezo": int(parts[2]) if len(parts) > 2 else 0,
+            "error": parts[2] if len(parts) > 2 else "unknown",
+            "piezo": int(parts[3]) if len(parts) > 3 else 0,
         }
 
     return {"success": False, "error": "unknown"}
@@ -129,16 +135,18 @@ def fire(device: ClaxonDevice, duration_ms: int) -> dict:
 class ClaxonPanel(tk.Frame):
     """Панель одного клаксона."""
 
-    NOTE_NAMES = ["C", "D", "E", "F", "G", "A"]
+    NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G"]
 
     def __init__(self, parent, index: int, app: "ClaxonApp"):
         super().__init__(parent, relief=tk.GROOVE, borderwidth=2, padx=10, pady=8)
-        self.index = index
+        self.index = index  # 0-7 глобальный индекс клаксона
         self.app = app
-        self.device: ClaxonDevice | None = None
+        self.esp: EspDevice | None = None
+        self.channel: int = (index % CHANNELS_PER_ESP) + 1  # 1 или 2
 
         # Заголовок
-        self.name_var = tk.StringVar(value=f"claxon-{index + 1}")
+        esp_num = (index // CHANNELS_PER_ESP) + 1
+        self.name_var = tk.StringVar(value=f"esp-{esp_num} ch{self.channel}")
         self.status_var = tk.StringVar(value="offline")
 
         header = tk.Frame(self)
@@ -213,9 +221,12 @@ class ClaxonPanel(tk.Frame):
         self.set_online(False)
         self.load_saved_settings()
 
+    def _settings_key(self) -> str:
+        esp_num = (self.index // CHANNELS_PER_ESP) + 1
+        return f"esp-{esp_num}-ch{self.channel}"
+
     def load_saved_settings(self):
-        key = f"claxon-{self.index + 1}"
-        saved = self.app.settings.get(key, {})
+        saved = self.app.settings.get(self._settings_key(), {})
         if "duration" in saved:
             self.duration_var.set(saved["duration"])
         if "threshold" in saved:
@@ -224,28 +235,28 @@ class ClaxonPanel(tk.Frame):
             self.power_var.set(saved["power"])
 
     def save_current_settings(self):
-        key = f"claxon-{self.index + 1}"
-        self.app.settings[key] = {
+        self.app.settings[self._settings_key()] = {
             "duration": self.duration_var.get(),
             "threshold": self.threshold_var.get(),
             "power": self.power_var.get(),
         }
         save_settings(self.app.settings)
 
-    def set_device(self, device: ClaxonDevice | None):
-        self.device = device
-        if device:
-            self.name_var.set(device.name)
+    def set_esp(self, esp: EspDevice | None):
+        self.esp = esp
+        if esp:
+            self.name_var.set(f"{esp.name} ch{self.channel}")
             self.set_online(True)
-            threading.Thread(target=self._sync_threshold, daemon=True).start()
+            threading.Thread(target=self._sync_settings, daemon=True).start()
         else:
-            self.name_var.set(f"claxon-{self.index + 1}")
+            esp_num = (self.index // CHANNELS_PER_ESP) + 1
+            self.name_var.set(f"esp-{esp_num} ch{self.channel}")
             self.set_online(False)
 
-    def _sync_threshold(self):
-        if self.device:
-            set_threshold(self.device, self.threshold_var.get())
-            set_power(self.device, self.power_var.get())
+    def _sync_settings(self):
+        if self.esp:
+            set_threshold(self.esp, self.channel, self.threshold_var.get())
+            set_power(self.esp, self.channel, self.power_var.get())
 
     def set_online(self, online: bool):
         if online:
@@ -262,14 +273,14 @@ class ClaxonPanel(tk.Frame):
 
     def on_set_threshold(self):
         self.save_current_settings()
-        if not self.device:
+        if not self.esp:
             self.feedback_var.set(f"Threshold saved locally ({self.threshold_var.get()})")
             return
         self.thresh_btn.config(state=tk.DISABLED)
         threading.Thread(target=self._set_threshold_thread, daemon=True).start()
 
     def _set_threshold_thread(self):
-        ok = set_threshold(self.device, self.threshold_var.get())
+        ok = set_threshold(self.esp, self.channel, self.threshold_var.get())
         self.after(0, self._set_threshold_done, ok)
 
     def _set_threshold_done(self, ok: bool):
@@ -281,14 +292,14 @@ class ClaxonPanel(tk.Frame):
 
     def on_set_power(self):
         self.save_current_settings()
-        if not self.device:
+        if not self.esp:
             self.feedback_var.set(f"Power saved locally ({self.power_var.get()}%)")
             return
         self.power_btn.config(state=tk.DISABLED)
         threading.Thread(target=self._set_power_thread, daemon=True).start()
 
     def _set_power_thread(self):
-        ok = set_power(self.device, self.power_var.get())
+        ok = set_power(self.esp, self.channel, self.power_var.get())
         self.after(0, self._set_power_done, ok)
 
     def _set_power_done(self, ok: bool):
@@ -299,7 +310,7 @@ class ClaxonPanel(tk.Frame):
             self.feedback_var.set("Power: NO RESPONSE (saved locally)")
 
     def on_fire(self):
-        if not self.device:
+        if not self.esp:
             return
         self.fire_btn.config(state=tk.DISABLED)
         self.feedback_var.set("...")
@@ -307,7 +318,7 @@ class ClaxonPanel(tk.Frame):
         threading.Thread(target=self._fire_thread, daemon=True).start()
 
     def _fire_thread(self):
-        result = fire(self.device, self.duration_var.get())
+        result = fire(self.esp, self.channel, self.duration_var.get())
         self.after(0, self._fire_done, result)
 
     def _fire_done(self, result: dict):
@@ -333,6 +344,8 @@ class ClaxonPanel(tk.Frame):
                 self.feedback_var.set("NO RESPONSE")
             elif error == "no_sound":
                 self.feedback_var.set("NO SOUND DETECTED")
+            elif error == "busy":
+                self.feedback_var.set("BUSY (другой канал играет)")
             else:
                 self.feedback_var.set(f"ERROR: {error}")
             self.detail_var.set("")
@@ -351,13 +364,11 @@ class ClaxonApp:
     def __init__(self):
         self.settings = load_settings()
         self.root = tk.Tk()
-        self.root.title("Claxon Controller")
+        self.root.title("Claxon Controller — 4 ESP × 2 ch = 8 claxons")
         self.root.resizable(False, False)
 
         self.midi_playing = False
         self.midi_stop_event = threading.Event()
-        # Карта калибровки: список задержек для каждого события MIDI
-        # calibration_map[i] = startup_delay_ms для события i
         self.calibration_map: list[int] = []
 
         # Верхняя панель
@@ -408,27 +419,27 @@ class ClaxonApp:
         self.midi_status_var = tk.StringVar(value="")
         tk.Label(midi_frame, textvariable=self.midi_status_var, font=("Arial", 9), fg="gray").pack(side=tk.LEFT, padx=6)
 
-        tk.Label(midi_frame, text="C D E F G A", font=("Arial", 9), fg="blue").pack(side=tk.RIGHT)
+        tk.Label(midi_frame, text="C C# D D# E F F# G", font=("Arial", 9), fg="blue").pack(side=tk.RIGHT)
 
-        # Сетка клаксонов 2x3
+        # Сетка клаксонов 2x4
         grid = tk.Frame(self.root, padx=10, pady=6)
         grid.pack(fill=tk.BOTH)
 
         self.panels: list[ClaxonPanel] = []
         for i in range(NUM_CLAXONS):
             panel = ClaxonPanel(grid, i, self)
-            row, col = divmod(i, 3)
+            row, col = divmod(i, 4)
             panel.grid(row=row, column=col, padx=4, pady=4, sticky="nsew")
             self.panels.append(panel)
 
-        for c in range(3):
+        for c in range(4):
             grid.columnconfigure(c, weight=1)
 
         # mDNS
         self.zc: Zeroconf | None = None
         self.listener: ClaxonDiscovery | None = None
         self.midi_data = None
-        self.midi_filename = None  # имя текущего MIDI файла (для ключа калибровки)
+        self.midi_filename = None
         self.start_discovery()
 
         # Автозагрузка последнего MIDI файла
@@ -457,19 +468,18 @@ class ClaxonApp:
             return
 
         devices = self.listener.devices
-        sorted_names = sorted(devices.keys())
 
-        for i, panel in enumerate(self.panels):
-            expected = f"claxon-{i + 1}"
-            if expected in devices:
-                panel.set_device(devices[expected])
-            elif i < len(sorted_names):
-                panel.set_device(devices[sorted_names[i]])
-            else:
-                panel.set_device(None)
+        # Маппинг: esp-N → панели (N-1)*2 и (N-1)*2+1
+        for i in range(NUM_ESPS):
+            esp_name = f"esp-{i + 1}"
+            esp = devices.get(esp_name)
+            for ch in range(CHANNELS_PER_ESP):
+                panel_idx = i * CHANNELS_PER_ESP + ch
+                self.panels[panel_idx].set_esp(esp)
 
-        online = sum(1 for p in self.panels if p.device)
-        self.info_var.set(f"{online}/{NUM_CLAXONS} online")
+        online_esps = sum(1 for i in range(NUM_ESPS) if f"esp-{i + 1}" in devices)
+        online_claxons = online_esps * CHANNELS_PER_ESP
+        self.info_var.set(f"{online_esps} ESP ({online_claxons}/{NUM_CLAXONS} claxons)")
 
     def apply_duration_all(self):
         val = self.global_duration.get()
@@ -478,7 +488,7 @@ class ClaxonApp:
 
     def fire_all(self):
         for panel in self.panels:
-            if panel.device:
+            if panel.esp:
                 panel.on_fire()
 
     # --- Calibration ---
@@ -512,7 +522,6 @@ class ClaxonApp:
             self.midi_status_var.set(f"Error: {e}")
             return
 
-        # Парсим MIDI в список событий (time_sec, claxon_index, duration_ms)
         events = []
         for track in mid.tracks:
             abs_time = 0
@@ -538,11 +547,9 @@ class ClaxonApp:
         filename = os.path.basename(path)
         self.midi_filename = filename
 
-        # Сохраняем путь к MIDI в settings
         self.settings["last_midi"] = path
         save_settings(self.settings)
 
-        # Загружаем калибровку из settings если есть и совпадает количество событий
         cal_key = f"cal:{filename}"
         saved_cal = self.settings.get(cal_key, [])
         if isinstance(saved_cal, list) and len(saved_cal) == len(events):
@@ -577,9 +584,6 @@ class ClaxonApp:
         self.midi_stop_event.set()
 
     def _midi_playback_thread(self):
-        """Воспроизведение MIDI с компенсацией и постоянной подстройкой карты.
-        1-й прогон (нет карты): без компенсации, замеряет задержки → создаёт карту.
-        Следующие прогоны: компенсирует по карте, замеряет остаток, корректирует."""
         events = self.midi_data
         start_time = time.time()
         has_cal = len(self.calibration_map) == len(events)
@@ -593,7 +597,6 @@ class ClaxonApp:
 
             panel = self.panels[claxon_idx]
 
-            # Компенсация из карты (0 если нет карты)
             compensation_ms = 0
             if has_cal and cal_map[i] >= 0:
                 compensation_ms = cal_map[i]
@@ -608,19 +611,15 @@ class ClaxonApp:
                         cal_map.extend([-1] * (len(events) - i))
                     break
 
-            if not panel.device:
+            if not panel.esp:
                 if not has_cal:
                     cal_map.append(-1)
                 continue
 
-            # FIRE с ожиданием ответа — получаем startup_delay
-            result = fire(panel.device, dur_ms)
+            result = fire(panel.esp, panel.channel, dur_ms)
             if result["success"]:
                 measured = result["startup_delay"]
                 if has_cal:
-                    # Ошибка = measured - comp (>0 опоздал, <0 раньше)
-                    # Новая компенсация = comp + ошибка = measured
-                    # Сглаживание: comp + 0.5 * ошибка (чтобы не прыгать)
                     residual = measured - compensation_ms
                     cal_map[i] = compensation_ms + residual // 2
                 else:
@@ -629,7 +628,6 @@ class ClaxonApp:
                 if not has_cal:
                     cal_map.append(-1)
 
-            # Подсветка и статус
             self.root.after(0, panel.flash)
             if has_cal:
                 new_val = cal_map[i]
@@ -645,7 +643,6 @@ class ClaxonApp:
                 ))
 
         self.calibration_map = cal_map
-        # Сохраняем карту калибровки в settings.json
         if self.midi_filename:
             self.settings[f"cal:{self.midi_filename}"] = cal_map
             save_settings(self.settings)
