@@ -10,5 +10,25 @@
     92,
     42
   ],
-  "last_midi": "/Users/evgeniy/Music/Logic/\u041a\u043b\u0430\u043a\u0441\u043e\u043d\u044b/\u041a\u043b\u0430\u043a\u0441\u043e\u043d\u044b.mid"
+  "last_midi": "/Users/evgeniy/Music/Logic/\u041a\u043b\u0430\u043a\u0441\u043e\u043d\u044b/\u041a\u043b\u0430\u043a\u0441\u043e\u043d\u044b.mid",
+  "esp-1-ch1": {
+    "duration": 50,
+    "threshold": 50,
+    "power": 6.0
+  },
+  "esp-1-ch2": {
+    "duration": 50,
+    "threshold": 50,
+    "power": 29.8
+  },
+  "esp-2-ch1": {
+    "duration": 50,
+    "threshold": 50,
+    "power": 18.5
+  },
+  "esp-2-ch2": {
+    "duration": 50,
+    "threshold": 200,
+    "power": 17.9
+  }
 }

@@ -12,13 +12,13 @@ const char* WIFI_SSID     = "claxon";
 const char* WIFI_PASSWORD = "asd567fgh";
 
 // Уникальное имя этого модуля (менять для каждого: esp-1, esp-2, esp-3, esp-4)
-const char* ESP_NAME = "esp-1";
+const char* ESP_NAME = "esp-2";
 
 #define NUM_CHANNELS  2
 
 // Пины клаксонов
 #define HORN_1_PIN  D2    // GPIO4  — клаксон 1
-#define HORN_2_PIN  D5    // GPIO14 — клаксон 2
+#define HORN_2_PIN  D1    // GPIO14 — клаксон 2
 
 // Два пьезо параллельно на один аналоговый вход
 #define PIEZO_PIN   A0

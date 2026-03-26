@@ -1,148 +1,31 @@
 """
-Claxon Controller GUI — tkinter интерфейс для управления 8 клаксонами.
+Claxon Controller GUI — tkinter интерфейс для настройки клаксонов.
 4 ESP × 2 канала = 8 клаксонов.
-Управление реальной длительностью звука (20-1000 мс) через обратную связь пьезо.
-Поддержка воспроизведения MIDI файлов с калибровкой задержек.
-Требует: pip install zeroconf mido
+Настройка: длительность, порог пьезо, мощность ШИМ, MIDI нота.
+Тестовый FIRE и MIDI playback с калибровкой.
 """
 
-import json
 import os
-import socket
 import threading
 import time
 import tkinter as tk
 from tkinter import ttk, filedialog
-from zeroconf import Zeroconf, ServiceBrowser, ServiceListener
 
-UDP_PORT = 5000
-RECV_TIMEOUT = 2.0
-NUM_ESPS = 4
-CHANNELS_PER_ESP = 2
-NUM_CLAXONS = NUM_ESPS * CHANNELS_PER_ESP  # 8
-SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
-
-# Маппинг MIDI нот на клаксоны (любая октава)
-# C=0, C#=1, D=2, D#=3, E=4, F=5, F#=6, G=7
-NOTE_TO_CLAXON = {0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7}
-
-
-def load_settings() -> dict:
-    try:
-        with open(SETTINGS_FILE) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-
-def save_settings(settings: dict):
-    with open(SETTINGS_FILE, "w") as f:
-        json.dump(settings, f, indent=2)
-
-
-class EspDevice:
-    """Одна ESP с 2 каналами клаксонов."""
-    def __init__(self, name: str, ip: str, port: int):
-        self.name = name
-        self.ip = ip
-        self.port = port
-
-
-class ClaxonDiscovery(ServiceListener):
-    def __init__(self, callback):
-        self.devices: dict[str, EspDevice] = {}
-        self.callback = callback
-
-    def update_service(self, zc, type_, name):
-        pass
-
-    def remove_service(self, zc, type_, name):
-        short_name = name.split(".")[0]
-        self.devices.pop(short_name, None)
-        self.callback()
-
-    def add_service(self, zc, type_, name):
-        info = zc.get_service_info(type_, name)
-        if info and info.addresses:
-            ip = socket.inet_ntoa(info.addresses[0])
-            port = info.port
-            short_name = name.split(".")[0]
-            self.devices[short_name] = EspDevice(short_name, ip, port)
-            self.callback()
-
-
-def send_command(esp: EspDevice, command: str) -> str | None:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.settimeout(RECV_TIMEOUT)
-    try:
-        sock.sendto(command.encode(), (esp.ip, esp.port))
-        data, _ = sock.recvfrom(256)
-        return data.decode()
-    except socket.timeout:
-        return None
-    finally:
-        sock.close()
-
-
-def fire_async(esp: EspDevice, channel: int, duration_ms: int):
-    """Отправляет FIRE без ожидания ответа (для MIDI playback)."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        cmd = f"FIRE:{channel}:{duration_ms}"
-        sock.sendto(cmd.encode(), (esp.ip, esp.port))
-    finally:
-        sock.close()
-
-
-def set_threshold(esp: EspDevice, channel: int, threshold: int) -> bool:
-    reply = send_command(esp, f"THRESH:{channel}:{threshold}")
-    return reply is not None and reply.startswith("THRESH:")
-
-
-def set_power(esp: EspDevice, channel: int, power: float) -> bool:
-    reply = send_command(esp, f"POWER:{channel}:{power:.1f}")
-    return reply is not None and reply.startswith("POWER:")
-
-
-def fire(esp: EspDevice, channel: int, duration_ms: int) -> dict:
-    cmd = f"FIRE:{channel}:{duration_ms}"
-    reply = send_command(esp, cmd)
-    if not reply:
-        return {"success": False, "error": "no_response"}
-
-    if reply.startswith("OK:"):
-        parts = reply.split(":")
-        # OK:ch:piezo:delay:sound_ms
-        return {
-            "success": True,
-            "piezo": int(parts[2]),
-            "startup_delay": int(parts[3]),
-            "actual_sound_ms": int(parts[4]),
-        }
-
-    if reply.startswith("FAIL:"):
-        parts = reply.split(":")
-        # FAIL:ch:reason[:piezo]
-        return {
-            "success": False,
-            "error": parts[2] if len(parts) > 2 else "unknown",
-            "piezo": int(parts[3]) if len(parts) > 3 else 0,
-        }
-
-    return {"success": False, "error": "unknown"}
+from claxon_core import (
+    ClaxonSystem, ALL_NOTE_NAMES, DEFAULT_NOTES,
+    NUM_ESPS, CHANNELS_PER_ESP, NUM_CLAXONS,
+    load_settings, save_settings,
+)
 
 
 class ClaxonPanel(tk.Frame):
     """Панель одного клаксона."""
 
-    NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G"]
-
     def __init__(self, parent, index: int, app: "ClaxonApp"):
         super().__init__(parent, relief=tk.GROOVE, borderwidth=2, padx=10, pady=8)
-        self.index = index  # 0-7 глобальный индекс клаксона
+        self.index = index
         self.app = app
-        self.esp: EspDevice | None = None
-        self.channel: int = (index % CHANNELS_PER_ESP) + 1  # 1 или 2
+        self.channel: int = (index % CHANNELS_PER_ESP) + 1
 
         # Заголовок
         esp_num = (index // CHANNELS_PER_ESP) + 1
@@ -153,7 +36,16 @@ class ClaxonPanel(tk.Frame):
         header.pack(fill=tk.X)
 
         tk.Label(header, textvariable=self.name_var, font=("Arial", 14, "bold")).pack(side=tk.LEFT)
-        tk.Label(header, text=f"[{self.NOTE_NAMES[index]}]", font=("Arial", 10), fg="blue").pack(side=tk.LEFT, padx=4)
+
+        # MIDI note selector
+        cfg = self.app.system.get_claxon_config(index)
+        self.note_var = tk.StringVar(value=ALL_NOTE_NAMES[cfg["note"]])
+        self.note_combo = ttk.Combobox(
+            header, textvariable=self.note_var, values=ALL_NOTE_NAMES,
+            width=3, state="readonly"
+        )
+        self.note_combo.pack(side=tk.LEFT, padx=4)
+        self.note_combo.bind("<<ComboboxSelected>>", lambda e: self.save_current_settings())
 
         self.status_label = tk.Label(header, textvariable=self.status_var, font=("Arial", 10))
         self.status_label.pack(side=tk.RIGHT)
@@ -163,7 +55,7 @@ class ClaxonPanel(tk.Frame):
         dur_frame.pack(fill=tk.X, pady=(6, 0))
 
         tk.Label(dur_frame, text="Sound ms:").pack(side=tk.LEFT)
-        self.duration_var = tk.IntVar(value=50)
+        self.duration_var = tk.IntVar(value=cfg["duration"])
         self.duration_scale = tk.Scale(
             dur_frame, from_=20, to=1000, orient=tk.HORIZONTAL,
             variable=self.duration_var, length=160, showvalue=True
@@ -175,7 +67,7 @@ class ClaxonPanel(tk.Frame):
         thresh_frame.pack(fill=tk.X, pady=(4, 0))
 
         tk.Label(thresh_frame, text="Threshold:").pack(side=tk.LEFT)
-        self.threshold_var = tk.IntVar(value=50)
+        self.threshold_var = tk.IntVar(value=cfg["threshold"])
         self.threshold_spin = tk.Spinbox(
             thresh_frame, from_=1, to=1023, increment=10,
             textvariable=self.threshold_var, width=5
@@ -189,7 +81,7 @@ class ClaxonPanel(tk.Frame):
         pwr_frame.pack(fill=tk.X, pady=(4, 0))
 
         tk.Label(pwr_frame, text="Power %:").pack(side=tk.LEFT)
-        self.power_var = tk.DoubleVar(value=100.0)
+        self.power_var = tk.DoubleVar(value=cfg["power"])
         self.power_scale = tk.Scale(
             pwr_frame, from_=0, to=100, orient=tk.HORIZONTAL,
             variable=self.power_var, length=200, showvalue=True,
@@ -219,44 +111,19 @@ class ClaxonPanel(tk.Frame):
         self.piezo_bar.pack(fill=tk.X, pady=(2, 0))
 
         self.set_online(False)
-        self.load_saved_settings()
 
-    def _settings_key(self) -> str:
-        esp_num = (self.index // CHANNELS_PER_ESP) + 1
-        return f"esp-{esp_num}-ch{self.channel}"
-
-    def load_saved_settings(self):
-        saved = self.app.settings.get(self._settings_key(), {})
-        if "duration" in saved:
-            self.duration_var.set(saved["duration"])
-        if "threshold" in saved:
-            self.threshold_var.set(saved["threshold"])
-        if "power" in saved:
-            self.power_var.set(saved["power"])
-
-    def save_current_settings(self):
-        self.app.settings[self._settings_key()] = {
+    def _get_config(self) -> dict:
+        note_name = self.note_var.get()
+        note_idx = ALL_NOTE_NAMES.index(note_name) if note_name in ALL_NOTE_NAMES else 0
+        return {
             "duration": self.duration_var.get(),
             "threshold": self.threshold_var.get(),
             "power": self.power_var.get(),
+            "note": note_idx,
         }
-        save_settings(self.app.settings)
 
-    def set_esp(self, esp: EspDevice | None):
-        self.esp = esp
-        if esp:
-            self.name_var.set(f"{esp.name} ch{self.channel}")
-            self.set_online(True)
-            threading.Thread(target=self._sync_settings, daemon=True).start()
-        else:
-            esp_num = (self.index // CHANNELS_PER_ESP) + 1
-            self.name_var.set(f"esp-{esp_num} ch{self.channel}")
-            self.set_online(False)
-
-    def _sync_settings(self):
-        if self.esp:
-            set_threshold(self.esp, self.channel, self.threshold_var.get())
-            set_power(self.esp, self.channel, self.power_var.get())
+    def save_current_settings(self):
+        self.app.system.set_claxon_config(self.index, self._get_config())
 
     def set_online(self, online: bool):
         if online:
@@ -271,46 +138,45 @@ class ClaxonPanel(tk.Frame):
             self.feedback_var.set("")
             self.detail_var.set("")
 
+    def update_esp_status(self):
+        system = self.app.system
+        online = system.is_online(self.index)
+        if online:
+            esp = system.get_esp_for_claxon(self.index)
+            self.name_var.set(f"{esp.name} ch{self.channel}")
+        else:
+            esp_num = (self.index // CHANNELS_PER_ESP) + 1
+            self.name_var.set(f"esp-{esp_num} ch{self.channel}")
+        self.set_online(online)
+
     def on_set_threshold(self):
         self.save_current_settings()
-        if not self.esp:
+        if not self.app.system.is_online(self.index):
             self.feedback_var.set(f"Threshold saved locally ({self.threshold_var.get()})")
             return
         self.thresh_btn.config(state=tk.DISABLED)
         threading.Thread(target=self._set_threshold_thread, daemon=True).start()
 
     def _set_threshold_thread(self):
-        ok = set_threshold(self.esp, self.channel, self.threshold_var.get())
-        self.after(0, self._set_threshold_done, ok)
-
-    def _set_threshold_done(self, ok: bool):
-        self.thresh_btn.config(state=tk.NORMAL)
-        if ok:
-            self.feedback_var.set(f"Threshold set to {self.threshold_var.get()}")
-        else:
-            self.feedback_var.set("Threshold: NO RESPONSE (saved locally)")
+        self.app.system.sync_claxon_to_esp(self.index)
+        self.after(0, lambda: self.thresh_btn.config(state=tk.NORMAL))
+        self.after(0, lambda: self.feedback_var.set(f"Threshold set to {self.threshold_var.get()}"))
 
     def on_set_power(self):
         self.save_current_settings()
-        if not self.esp:
+        if not self.app.system.is_online(self.index):
             self.feedback_var.set(f"Power saved locally ({self.power_var.get()}%)")
             return
         self.power_btn.config(state=tk.DISABLED)
         threading.Thread(target=self._set_power_thread, daemon=True).start()
 
     def _set_power_thread(self):
-        ok = set_power(self.esp, self.channel, self.power_var.get())
-        self.after(0, self._set_power_done, ok)
-
-    def _set_power_done(self, ok: bool):
-        self.power_btn.config(state=tk.NORMAL)
-        if ok:
-            self.feedback_var.set(f"Power set to {self.power_var.get()}%")
-        else:
-            self.feedback_var.set("Power: NO RESPONSE (saved locally)")
+        self.app.system.sync_claxon_to_esp(self.index)
+        self.after(0, lambda: self.power_btn.config(state=tk.NORMAL))
+        self.after(0, lambda: self.feedback_var.set(f"Power set to {self.power_var.get()}%"))
 
     def on_fire(self):
-        if not self.esp:
+        if not self.app.system.is_online(self.index):
             return
         self.fire_btn.config(state=tk.DISABLED)
         self.feedback_var.set("...")
@@ -318,7 +184,7 @@ class ClaxonPanel(tk.Frame):
         threading.Thread(target=self._fire_thread, daemon=True).start()
 
     def _fire_thread(self):
-        result = fire(self.esp, self.channel, self.duration_var.get())
+        result = self.app.system.fire(self.index, self.duration_var.get())
         self.after(0, self._fire_done, result)
 
     def _fire_done(self, result: dict):
@@ -362,7 +228,8 @@ class ClaxonPanel(tk.Frame):
 
 class ClaxonApp:
     def __init__(self):
-        self.settings = load_settings()
+        self.system = ClaxonSystem()
+
         self.root = tk.Tk()
         self.root.title("Claxon Controller — 4 ESP × 2 ch = 8 claxons")
         self.root.resizable(False, False)
@@ -419,7 +286,8 @@ class ClaxonApp:
         self.midi_status_var = tk.StringVar(value="")
         tk.Label(midi_frame, textvariable=self.midi_status_var, font=("Arial", 9), fg="gray").pack(side=tk.LEFT, padx=6)
 
-        tk.Label(midi_frame, text="C C# D D# E F F# G", font=("Arial", 9), fg="blue").pack(side=tk.RIGHT)
+        self.midi_note_label_var = tk.StringVar(value="")
+        tk.Label(midi_frame, textvariable=self.midi_note_label_var, font=("Arial", 9), fg="blue").pack(side=tk.RIGHT)
 
         # Сетка клаксонов 2x4
         grid = tk.Frame(self.root, padx=10, pady=6)
@@ -435,49 +303,32 @@ class ClaxonApp:
         for c in range(4):
             grid.columnconfigure(c, weight=1)
 
+        self._update_note_label()
+
         # mDNS
-        self.zc: Zeroconf | None = None
-        self.listener: ClaxonDiscovery | None = None
         self.midi_data = None
         self.midi_filename = None
+        self.system.set_on_change(lambda: self.root.after(100, self._update_panels))
         self.start_discovery()
 
         # Автозагрузка последнего MIDI файла
-        last_midi = self.settings.get("last_midi")
+        last_midi = self.system.settings.get("last_midi")
         if last_midi and os.path.isfile(last_midi):
             self._load_midi_file(last_midi)
 
+    def _update_note_label(self):
+        self.midi_note_label_var.set(" ".join(self.system.note_names_list()))
+
     def start_discovery(self):
-        self.stop_discovery()
         self.info_var.set("Scanning...")
-        self.zc = Zeroconf()
-        self.listener = ClaxonDiscovery(callback=self._on_devices_changed)
-        ServiceBrowser(self.zc, "_claxon._udp.local.", self.listener)
+        self.system.start_discovery()
         self.root.after(3000, self._update_panels)
 
-    def stop_discovery(self):
-        if self.zc:
-            self.zc.close()
-            self.zc = None
-
-    def _on_devices_changed(self):
-        self.root.after(100, self._update_panels)
-
     def _update_panels(self):
-        if not self.listener:
-            return
+        for panel in self.panels:
+            panel.update_esp_status()
 
-        devices = self.listener.devices
-
-        # Маппинг: esp-N → панели (N-1)*2 и (N-1)*2+1
-        for i in range(NUM_ESPS):
-            esp_name = f"esp-{i + 1}"
-            esp = devices.get(esp_name)
-            for ch in range(CHANNELS_PER_ESP):
-                panel_idx = i * CHANNELS_PER_ESP + ch
-                self.panels[panel_idx].set_esp(esp)
-
-        online_esps = sum(1 for i in range(NUM_ESPS) if f"esp-{i + 1}" in devices)
+        online_esps = sum(1 for i in range(NUM_ESPS) if f"esp-{i + 1}" in self.system.devices)
         online_claxons = online_esps * CHANNELS_PER_ESP
         self.info_var.set(f"{online_esps} ESP ({online_claxons}/{NUM_CLAXONS} claxons)")
 
@@ -488,7 +339,7 @@ class ClaxonApp:
 
     def fire_all(self):
         for panel in self.panels:
-            if panel.esp:
+            if self.system.is_online(panel.index):
                 panel.on_fire()
 
     # --- Calibration ---
@@ -496,8 +347,8 @@ class ClaxonApp:
     def reset_calibration(self):
         self.calibration_map = []
         if self.midi_filename:
-            self.settings.pop(f"cal:{self.midi_filename}", None)
-            save_settings(self.settings)
+            self.system.settings.pop(f"cal:{self.midi_filename}", None)
+            save_settings(self.system.settings)
         self.midi_status_var.set("Calibration reset")
 
     # --- MIDI ---
@@ -513,8 +364,7 @@ class ClaxonApp:
 
     def _load_midi_file(self, path: str):
         try:
-            import mido
-            mid = mido.MidiFile(path)
+            events = self.system.parse_midi(path)
         except ImportError:
             self.midi_status_var.set("pip install mido")
             return
@@ -522,53 +372,26 @@ class ClaxonApp:
             self.midi_status_var.set(f"Error: {e}")
             return
 
-        events = []
-        for track in mid.tracks:
-            abs_time = 0
-            note_on_times: dict[int, float] = {}
-            for msg in track:
-                abs_time += mido.tick2second(msg.time, mid.ticks_per_beat, self._get_tempo(mid))
-                if msg.type == "note_on" and msg.velocity > 0:
-                    note_class = msg.note % 12
-                    if note_class in NOTE_TO_CLAXON:
-                        note_on_times[msg.note] = abs_time
-                elif msg.type == "note_off" or (msg.type == "note_on" and msg.velocity == 0):
-                    note_class = msg.note % 12
-                    if msg.note in note_on_times and note_class in NOTE_TO_CLAXON:
-                        start = note_on_times.pop(msg.note)
-                        dur_ms = int((abs_time - start) * 1000)
-                        dur_ms = max(20, min(1000, dur_ms))
-                        claxon_idx = NOTE_TO_CLAXON[note_class]
-                        events.append((start, claxon_idx, dur_ms))
-
-        events.sort(key=lambda e: e[0])
         self.midi_data = events
+        self._update_note_label()
 
         filename = os.path.basename(path)
         self.midi_filename = filename
 
-        self.settings["last_midi"] = path
-        save_settings(self.settings)
+        self.system.settings["last_midi"] = path
+        save_settings(self.system.settings)
 
         cal_key = f"cal:{filename}"
-        saved_cal = self.settings.get(cal_key, [])
+        saved_cal = self.system.settings.get(cal_key, [])
         if isinstance(saved_cal, list) and len(saved_cal) == len(events):
             self.calibration_map = saved_cal
         else:
             self.calibration_map = []
 
         self.midi_file_var.set(filename)
-        cal_info = f", cal loaded" if self.calibration_map else ""
+        cal_info = ", cal loaded" if self.calibration_map else ""
         self.midi_status_var.set(f"{len(events)} notes{cal_info}")
         self.midi_play_btn.config(state=tk.NORMAL)
-
-    def _get_tempo(self, mid):
-        import mido
-        for track in mid.tracks:
-            for msg in track:
-                if msg.type == "set_tempo":
-                    return msg.tempo
-        return mido.bpm2tempo(120)
 
     def play_midi(self):
         if not self.midi_data or self.midi_playing:
@@ -584,6 +407,7 @@ class ClaxonApp:
         self.midi_stop_event.set()
 
     def _midi_playback_thread(self):
+        from claxon_core import fire as fire_sync
         events = self.midi_data
         start_time = time.time()
         has_cal = len(self.calibration_map) == len(events)
@@ -611,12 +435,14 @@ class ClaxonApp:
                         cal_map.extend([-1] * (len(events) - i))
                     break
 
-            if not panel.esp:
+            esp = self.system.get_esp_for_claxon(claxon_idx)
+            if not esp:
                 if not has_cal:
                     cal_map.append(-1)
                 continue
 
-            result = fire(panel.esp, panel.channel, dur_ms)
+            channel = self.system.get_channel_for_claxon(claxon_idx)
+            result = fire_sync(esp, channel, dur_ms)
             if result["success"]:
                 measured = result["startup_delay"]
                 if has_cal:
@@ -644,8 +470,8 @@ class ClaxonApp:
 
         self.calibration_map = cal_map
         if self.midi_filename:
-            self.settings[f"cal:{self.midi_filename}"] = cal_map
-            save_settings(self.settings)
+            self.system.settings[f"cal:{self.midi_filename}"] = cal_map
+            save_settings(self.system.settings)
         self.root.after(0, self._midi_playback_done)
 
     def _midi_playback_done(self):
@@ -663,7 +489,7 @@ class ClaxonApp:
             self.root.mainloop()
         finally:
             self.midi_stop_event.set()
-            self.stop_discovery()
+            self.system.stop_discovery()
 
 
 if __name__ == "__main__":
