@@ -144,7 +144,10 @@ class ClaxonPanel(tk.Frame):
         }
 
     def save_current_settings(self):
-        self.app.system.set_claxon_config(self.index, self._get_config())
+        # Обновляем только изменяемые ползунками поля, сохраняя калибровку и прочие параметры.
+        cfg = self.app.system.get_claxon_config(self.index)
+        cfg.update(self._get_config())
+        self.app.system.set_claxon_config(self.index, cfg)
 
     def set_online(self, online: bool):
         if online:

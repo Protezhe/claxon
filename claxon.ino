@@ -12,7 +12,7 @@ const char* WIFI_SSID     = "claxon";
 const char* WIFI_PASSWORD = "asd567fgh";
 
 // Уникальное имя этого модуля (менять для каждого: esp-1, esp-2, esp-3, esp-4)
-const char* ESP_NAME = "esp-3";
+const char* ESP_NAME = "esp-2";
 
 #define NUM_CHANNELS  2
 

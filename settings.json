@@ -18,49 +18,55 @@
     "threshold": 75,
     "power": 100.0,
     "note": 7,
-    "startup_delay_ms": 181,
+    "startup_delay_ms": 91,
     "play_comp_ms": 8
   },
   "esp-2-ch1": {
-    "duration": 20,
+    "duration": 55,
     "threshold": 150,
-    "power": 100.0,
-    "note": 8,
-    "play_comp_ms": 2
+    "power": 15.5,
+    "note": 7,
+    "play_comp_ms": 24,
+    "startup_delay_ms": 100
   },
   "esp-2-ch2": {
-    "duration": 20,
+    "duration": 55,
     "threshold": 170,
-    "power": 99.4,
+    "power": 16.1,
     "note": 9,
-    "play_comp_ms": 4
+    "play_comp_ms": 14,
+    "startup_delay_ms": 84
   },
   "esp-3-ch1": {
-    "duration": 193,
-    "threshold": 150,
+    "duration": 55,
+    "threshold": 100,
     "power": 11.9,
     "note": 0,
-    "play_comp_ms": 1
+    "play_comp_ms": 33,
+    "startup_delay_ms": 50
   },
   "esp-3-ch2": {
-    "duration": 146,
+    "duration": 50,
     "threshold": 220,
-    "power": 13.1,
+    "power": 12.5,
     "note": 2,
-    "play_comp_ms": 1
+    "play_comp_ms": 33,
+    "startup_delay_ms": 55
   },
   "esp-4-ch1": {
-    "duration": 20,
+    "duration": 72,
     "threshold": 200,
-    "power": 10.1,
+    "power": 9.5,
     "note": 4,
-    "play_comp_ms": 1
+    "play_comp_ms": 38,
+    "startup_delay_ms": 76
   },
   "esp-4-ch2": {
-    "duration": 159,
+    "duration": 81,
     "threshold": 170,
-    "power": 38.7,
+    "power": 9.5,
     "note": 5,
-    "play_comp_ms": 1
+    "play_comp_ms": 18,
+    "startup_delay_ms": 56
   }
 }

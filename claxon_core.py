@@ -254,7 +254,14 @@ class ClaxonSystem:
     def set_claxon_config(self, index: int, config: dict):
         """Сохраняет настройки клаксона и синхронизирует с ESP если онлайн."""
         key = claxon_key(index)
-        self.settings[key] = config
+        # Не затираем неизвестные поля (например startup_delay_ms после калибровки)
+        # при частичном обновлении из GUI.
+        current = self.settings.get(key, {})
+        if not isinstance(current, dict):
+            current = {}
+        merged = dict(current)
+        merged.update(config)
+        self.settings[key] = merged
         save_settings(self.settings)
 
         esp = self.get_esp_for_claxon(index)
