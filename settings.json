@@ -4,31 +4,63 @@
     "threshold": 70,
     "power": 7.7
   },
-  "cal:\u041a\u043b\u0430\u043a\u0441\u043e\u043d\u044b.mid": [
-    115,
-    63,
-    92,
-    42
-  ],
-  "last_midi": "/Users/evgeniy/Music/Logic/\u041a\u043b\u0430\u043a\u0441\u043e\u043d\u044b/\u041a\u043b\u0430\u043a\u0441\u043e\u043d\u044b.mid",
+  "last_midi": "/Users/evgeniy/Documents/Arduino/claxon/\u041a\u043b\u0430\u043a\u0441\u043e\u043d\u044b2test.mid",
   "esp-1-ch1": {
-    "duration": 50,
-    "threshold": 50,
-    "power": 6.0
+    "duration": 20,
+    "threshold": 140,
+    "power": 100.0,
+    "note": 6,
+    "startup_delay_ms": 224,
+    "play_comp_ms": 4
   },
   "esp-1-ch2": {
-    "duration": 50,
-    "threshold": 50,
-    "power": 29.8
+    "duration": 20,
+    "threshold": 75,
+    "power": 100.0,
+    "note": 7,
+    "startup_delay_ms": 181,
+    "play_comp_ms": 8
   },
   "esp-2-ch1": {
-    "duration": 50,
-    "threshold": 50,
-    "power": 18.5
+    "duration": 20,
+    "threshold": 150,
+    "power": 100.0,
+    "note": 8,
+    "play_comp_ms": 2
   },
   "esp-2-ch2": {
-    "duration": 50,
+    "duration": 20,
+    "threshold": 170,
+    "power": 99.4,
+    "note": 9,
+    "play_comp_ms": 4
+  },
+  "esp-3-ch1": {
+    "duration": 193,
+    "threshold": 150,
+    "power": 11.9,
+    "note": 0,
+    "play_comp_ms": 1
+  },
+  "esp-3-ch2": {
+    "duration": 146,
+    "threshold": 220,
+    "power": 13.1,
+    "note": 2,
+    "play_comp_ms": 1
+  },
+  "esp-4-ch1": {
+    "duration": 20,
     "threshold": 200,
-    "power": 17.9
+    "power": 10.1,
+    "note": 4,
+    "play_comp_ms": 1
+  },
+  "esp-4-ch2": {
+    "duration": 159,
+    "threshold": 170,
+    "power": 38.7,
+    "note": 5,
+    "play_comp_ms": 1
   }
 }

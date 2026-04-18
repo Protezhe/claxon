@@ -14,7 +14,7 @@ from tkinter import ttk, filedialog
 from claxon_core import (
     ClaxonSystem, ALL_NOTE_NAMES, DEFAULT_NOTES,
     NUM_ESPS, CHANNELS_PER_ESP, NUM_CLAXONS,
-    load_settings, save_settings,
+    save_settings,
 )
 
 
@@ -91,13 +91,33 @@ class ClaxonPanel(tk.Frame):
         self.power_btn = tk.Button(pwr_frame, text="Set", command=self.on_set_power)
         self.power_btn.pack(side=tk.LEFT, padx=4)
 
+        # Компенсация старта для PLAY: уменьшает boost перед снижением мощности
+        comp_frame = tk.Frame(self)
+        comp_frame.pack(fill=tk.X, pady=(4, 0))
+        tk.Label(comp_frame, text="Play comp ms:").pack(side=tk.LEFT)
+        self.play_comp_var = tk.IntVar(value=cfg.get("play_comp_ms", 0))
+        self.play_comp_spin = tk.Spinbox(
+            comp_frame, from_=0, to=500, increment=1,
+            textvariable=self.play_comp_var, width=5,
+            command=self.save_current_settings
+        )
+        self.play_comp_spin.pack(side=tk.LEFT, padx=4)
+        self.play_comp_spin.bind("<FocusOut>", lambda e: self.save_current_settings())
+        self.play_comp_spin.bind("<Return>", lambda e: self.save_current_settings())
+
         # Кнопка FIRE
+        fire_frame = tk.Frame(self)
+        fire_frame.pack(fill=tk.X, pady=(6, 0))
+
         self.fire_btn = tk.Button(
-            self, text="FIRE", font=("Arial", 16, "bold"),
+            fire_frame, text="FIRE", font=("Arial", 16, "bold"),
             bg="#cc3333", fg="white", activebackground="#ff4444",
             height=1, command=self.on_fire
         )
-        self.fire_btn.pack(fill=tk.X, pady=(6, 0))
+        self.fire_btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self.cal_btn = tk.Button(fire_frame, text="Cal", width=5, command=self.on_calibrate)
+        self.cal_btn.pack(side=tk.LEFT, padx=(6, 0))
 
         # Обратная связь
         self.feedback_var = tk.StringVar(value="")
@@ -120,6 +140,7 @@ class ClaxonPanel(tk.Frame):
             "threshold": self.threshold_var.get(),
             "power": self.power_var.get(),
             "note": note_idx,
+            "play_comp_ms": max(0, int(self.play_comp_var.get())),
         }
 
     def save_current_settings(self):
@@ -130,10 +151,12 @@ class ClaxonPanel(tk.Frame):
             self.status_var.set("online")
             self.status_label.config(fg="green")
             self.fire_btn.config(state=tk.NORMAL)
+            self.cal_btn.config(state=tk.NORMAL)
         else:
             self.status_var.set("offline")
             self.status_label.config(fg="gray")
             self.fire_btn.config(state=tk.DISABLED)
+            self.cal_btn.config(state=tk.DISABLED)
             self.piezo_bar["value"] = 0
             self.feedback_var.set("")
             self.detail_var.set("")
@@ -178,42 +201,41 @@ class ClaxonPanel(tk.Frame):
     def on_fire(self):
         if not self.app.system.is_online(self.index):
             return
-        self.fire_btn.config(state=tk.DISABLED)
-        self.feedback_var.set("...")
-        self.detail_var.set("")
-        threading.Thread(target=self._fire_thread, daemon=True).start()
-
-    def _fire_thread(self):
-        result = self.app.system.fire(self.index, self.duration_var.get())
-        self.after(0, self._fire_done, result)
-
-    def _fire_done(self, result: dict):
-        self.fire_btn.config(state=tk.NORMAL)
         self.save_current_settings()
+        base_ms = self.app._get_startup_delay_ms(self.index)
+        if base_ms < 0:
+            base_ms = 0
+        try:
+            play_comp_ms = max(0, int(self.play_comp_var.get()))
+        except Exception:
+            play_comp_ms = 0
+        boost_ms = max(0, base_ms - play_comp_ms)
+        self.app.system.fire_async(self.index, self.duration_var.get(), boost_ms=boost_ms)
+        self.flash()
+        self.feedback_var.set("PLAY")
+        self.detail_var.set(f"boost={boost_ms}ms (cal={base_ms}, comp={play_comp_ms})")
 
-        if result["success"]:
-            piezo = result["piezo"]
-            delay = result["startup_delay"]
-            actual = result["actual_sound_ms"]
-            self.piezo_bar["value"] = piezo
+    def on_calibrate(self):
+        if not self.app.system.is_online(self.index):
+            return
+        self.save_current_settings()
+        self.cal_btn.config(state=tk.DISABLED)
+        self.feedback_var.set("CAL...")
+        self.detail_var.set("")
+        threading.Thread(target=self._calibrate_thread, daemon=True).start()
 
-            if piezo < 50:
-                self.feedback_var.set("SILENT!")
-            else:
-                self.feedback_var.set(f"OK (piezo={piezo})")
+    def _calibrate_thread(self):
+        result = self.app.calibrate_claxon(self.index, self.duration_var.get())
+        self.after(0, self._calibrate_done, result)
 
-            self.detail_var.set(f"delay={delay}ms, sound={actual}ms")
+    def _calibrate_done(self, result: dict):
+        self.cal_btn.config(state=tk.NORMAL)
+        if result.get("success"):
+            delay = result["delay"]
+            self.feedback_var.set(f"CAL {delay}ms")
+            self.detail_var.set("saved")
         else:
-            error = result.get("error", "unknown")
-            self.piezo_bar["value"] = result.get("piezo", 0)
-            if error == "no_response":
-                self.feedback_var.set("NO RESPONSE")
-            elif error == "no_sound":
-                self.feedback_var.set("NO SOUND DETECTED")
-            elif error == "busy":
-                self.feedback_var.set("BUSY (другой канал играет)")
-            else:
-                self.feedback_var.set(f"ERROR: {error}")
+            self.feedback_var.set(result.get("message", "CAL FAIL"))
             self.detail_var.set("")
 
     def flash(self):
@@ -236,7 +258,6 @@ class ClaxonApp:
 
         self.midi_playing = False
         self.midi_stop_event = threading.Event()
-        self.calibration_map: list[int] = []
 
         # Верхняя панель
         top = tk.Frame(self.root, padx=10, pady=6)
@@ -280,8 +301,6 @@ class ClaxonApp:
 
         self.midi_stop_btn = tk.Button(midi_frame, text="Stop", command=self.stop_midi, state=tk.DISABLED)
         self.midi_stop_btn.pack(side=tk.LEFT, padx=2)
-
-        tk.Button(midi_frame, text="Reset Cal", command=self.reset_calibration).pack(side=tk.LEFT, padx=6)
 
         self.midi_status_var = tk.StringVar(value="")
         tk.Label(midi_frame, textvariable=self.midi_status_var, font=("Arial", 9), fg="gray").pack(side=tk.LEFT, padx=6)
@@ -344,12 +363,38 @@ class ClaxonApp:
 
     # --- Calibration ---
 
-    def reset_calibration(self):
-        self.calibration_map = []
-        if self.midi_filename:
-            self.system.settings.pop(f"cal:{self.midi_filename}", None)
-            save_settings(self.system.settings)
-        self.midi_status_var.set("Calibration reset")
+    def _get_startup_delay_ms(self, index: int) -> int:
+        cfg = self.system.get_claxon_config(index)
+        try:
+            value = int(cfg.get("startup_delay_ms", -1))
+            return value if value >= 0 else -1
+        except Exception:
+            return -1
+
+    def _set_startup_delay_ms(self, index: int, delay_ms: int):
+        cfg = self.system.get_claxon_config(index)
+        cfg["startup_delay_ms"] = int(delay_ms)
+        self.system.set_claxon_config(index, cfg)
+
+    def calibrate_claxon(self, index: int, duration_ms: int) -> dict:
+        result = self.system.fire(index, duration_ms)
+        if result.get("success"):
+            delay = int(result.get("startup_delay", -1))
+            self._set_startup_delay_ms(index, delay)
+            return {"success": True, "delay": delay}
+        self._set_startup_delay_ms(index, -1)
+        error = result.get("error", "unknown")
+        if error == "no_response":
+            msg = "CAL NO RESPONSE"
+        elif error == "no_sound":
+            msg = "CAL NO SOUND"
+        elif error == "busy":
+            msg = "CAL BUSY"
+        elif error == "offline":
+            msg = "CAL OFFLINE"
+        else:
+            msg = f"CAL ERROR: {error}"
+        return {"success": False, "message": msg}
 
     # --- MIDI ---
 
@@ -381,16 +426,10 @@ class ClaxonApp:
         self.system.settings["last_midi"] = path
         save_settings(self.system.settings)
 
-        cal_key = f"cal:{filename}"
-        saved_cal = self.system.settings.get(cal_key, [])
-        if isinstance(saved_cal, list) and len(saved_cal) == len(events):
-            self.calibration_map = saved_cal
-        else:
-            self.calibration_map = []
-
         self.midi_file_var.set(filename)
-        cal_info = ", cal loaded" if self.calibration_map else ""
-        self.midi_status_var.set(f"{len(events)} notes{cal_info}")
+        used_claxons = {claxon_idx for _, claxon_idx, _ in events}
+        calibrated = sum(1 for idx in used_claxons if self._get_startup_delay_ms(idx) >= 0)
+        self.midi_status_var.set(f"{len(events)} notes, cal {calibrated}/{len(used_claxons)}")
         self.midi_play_btn.config(state=tk.NORMAL)
 
     def play_midi(self):
@@ -407,71 +446,49 @@ class ClaxonApp:
         self.midi_stop_event.set()
 
     def _midi_playback_thread(self):
-        from claxon_core import fire as fire_sync
+        from claxon_core import fire_async
         events = self.midi_data
         start_time = time.time()
-        has_cal = len(self.calibration_map) == len(events)
-        cal_map = list(self.calibration_map) if has_cal else []
+        played = 0
 
         for i, (event_time, claxon_idx, dur_ms) in enumerate(events):
             if self.midi_stop_event.is_set():
-                if not has_cal:
-                    cal_map.extend([-1] * (len(events) - i))
                 break
 
             panel = self.panels[claxon_idx]
 
-            compensation_ms = 0
-            if has_cal and cal_map[i] >= 0:
-                compensation_ms = cal_map[i]
+            calibration_ms = self._get_startup_delay_ms(claxon_idx)
+            if calibration_ms < 0:
+                calibration_ms = 0
 
-            fire_time = event_time - (compensation_ms / 1000.0)
+            try:
+                play_comp_ms = max(0, int(panel.play_comp_var.get()))
+            except Exception:
+                play_comp_ms = 0
+            boost_ms = max(0, calibration_ms - play_comp_ms)
+
+            fire_time = event_time - (calibration_ms / 1000.0)
             target = start_time + fire_time
             now = time.time()
             if target > now:
                 wait = target - now
                 if self.midi_stop_event.wait(timeout=wait):
-                    if not has_cal:
-                        cal_map.extend([-1] * (len(events) - i))
                     break
 
             esp = self.system.get_esp_for_claxon(claxon_idx)
             if not esp:
-                if not has_cal:
-                    cal_map.append(-1)
                 continue
 
             channel = self.system.get_channel_for_claxon(claxon_idx)
-            result = fire_sync(esp, channel, dur_ms)
-            if result["success"]:
-                measured = result["startup_delay"]
-                if has_cal:
-                    residual = measured - compensation_ms
-                    cal_map[i] = compensation_ms + residual // 2
-                else:
-                    cal_map.append(measured)
-            else:
-                if not has_cal:
-                    cal_map.append(-1)
+            fire_async(esp, channel, dur_ms, boost_ms=boost_ms)
+            played += 1
 
             self.root.after(0, panel.flash)
-            if has_cal:
-                new_val = cal_map[i]
-                delta = new_val - compensation_ms
-                sign = "+" if delta >= 0 else ""
-                self.root.after(0, lambda idx=i, c=new_val, s=sign, d=delta: self.midi_status_var.set(
-                    f"Playing {idx + 1}/{len(events)} (comp={c}ms, {s}{d}ms)"
-                ))
-            else:
-                delay_str = f"{cal_map[-1]}ms" if cal_map[-1] >= 0 else "fail"
-                self.root.after(0, lambda idx=i, d=delay_str: self.midi_status_var.set(
-                    f"Playing {idx + 1}/{len(events)} (delay={d})"
-                ))
+            self.root.after(0, lambda idx=i, c=calibration_ms, p=play_comp_ms, b=boost_ms: self.midi_status_var.set(
+                f"Playing {idx + 1}/{len(events)} (cal={c}ms, comp={p}ms, boost={b}ms)"
+            ))
 
-        self.calibration_map = cal_map
-        if self.midi_filename:
-            self.system.settings[f"cal:{self.midi_filename}"] = cal_map
-            save_settings(self.system.settings)
+        self._last_played_count = played
         self.root.after(0, self._midi_playback_done)
 
     def _midi_playback_done(self):
@@ -481,8 +498,8 @@ class ClaxonApp:
         if self.midi_stop_event.is_set():
             self.midi_status_var.set("Stopped")
         else:
-            mapped = sum(1 for d in self.calibration_map if d >= 0)
-            self.midi_status_var.set(f"Done ({mapped} notes calibrated)")
+            played = getattr(self, "_last_played_count", 0)
+            self.midi_status_var.set(f"Done ({played}/{len(self.midi_data or [])} sent)")
 
     def run(self):
         try:

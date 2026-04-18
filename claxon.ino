@@ -12,7 +12,7 @@ const char* WIFI_SSID     = "claxon";
 const char* WIFI_PASSWORD = "asd567fgh";
 
 // Уникальное имя этого модуля (менять для каждого: esp-1, esp-2, esp-3, esp-4)
-const char* ESP_NAME = "esp-2";
+const char* ESP_NAME = "esp-3";
 
 #define NUM_CHANNELS  2
 
@@ -29,6 +29,7 @@ const char* ESP_NAME = "esp-2";
 #define DEFAULT_THRESHOLD 50
 #define MAX_WAIT_MS      500
 #define TAIL_MS           20
+#define STARTUP_PWM     1023
 
 // ===== СОСТОЯНИЯ =====
 enum HornState {
@@ -44,6 +45,10 @@ struct HornChannel {
   HornState state;
   int piezoThreshold;
   int hornPwm;
+  bool useFeedback;
+  bool sendReply;
+  bool powerReduced;
+  unsigned long boostMs;
   unsigned long hornOnTime;
   unsigned long soundStartTime;
   unsigned long soundStopTime;
@@ -62,8 +67,19 @@ char packetBuf[64];
 HornChannel ch[NUM_CHANNELS];
 const int hornPins[NUM_CHANNELS] = { HORN_1_PIN, HORN_2_PIN };
 
-// Какой канал сейчас активен (-1 = никакой)
-int activeChannel = -1;
+bool anyChannelActive() {
+  for (int i = 0; i < NUM_CHANNELS; i++) {
+    if (ch[i].state != IDLE) return true;
+  }
+  return false;
+}
+
+bool anyFeedbackActive() {
+  for (int i = 0; i < NUM_CHANNELS; i++) {
+    if (ch[i].state != IDLE && ch[i].useFeedback) return true;
+  }
+  return false;
+}
 
 void setup() {
   Serial.begin(115200);
@@ -76,6 +92,10 @@ void setup() {
     ch[i].state = IDLE;
     ch[i].piezoThreshold = DEFAULT_THRESHOLD;
     ch[i].hornPwm = 1023;
+    ch[i].useFeedback = true;
+    ch[i].sendReply = true;
+    ch[i].powerReduced = false;
+    ch[i].boostMs = 0;
     ch[i].soundDuration = DEFAULT_SOUND_MS;
     ch[i].peakPiezo = 0;
     ch[i].startupDelay = 0;
@@ -103,7 +123,7 @@ void setup() {
   // UDP
   udp.begin(UDP_PORT);
   Serial.printf("UDP listening on port %d\n", UDP_PORT);
-  Serial.println("Ready. Commands: FIRE:ch:ms, PING, STATUS");
+  Serial.println("Ready. Commands: FIRE:ch:ms, PLAY:ch:ms:boost, PING, STATUS");
 }
 
 void loop() {
@@ -120,9 +140,11 @@ void loop() {
     handleCommand(packetBuf, remoteIP, remotePort);
   }
 
-  // Обновляем только активный канал (один пьезо на A0)
-  if (activeChannel >= 0) {
-    updateChannel(activeChannel);
+  // В PLAY можно обновлять оба канала параллельно.
+  for (int i = 0; i < NUM_CHANNELS; i++) {
+    if (ch[i].state != IDLE) {
+      updateChannel(i);
+    }
   }
 }
 
@@ -138,12 +160,14 @@ void updateChannel(int idx) {
       if (piezo >= c.piezoThreshold) {
         c.soundStartTime = millis();
         c.startupDelay = c.soundStartTime - c.hornOnTime;
+        // После подтверждения звука снижаем до рабочей мощности канала.
+        analogWrite(c.hornPin, c.hornPwm);
+        c.powerReduced = true;
         c.state = SOUNDING;
         Serial.printf("Ch%d: Sound after %lu ms (piezo=%d)\n", idx + 1, c.startupDelay, piezo);
       } else if (millis() - c.hornOnTime >= MAX_WAIT_MS) {
         digitalWrite(c.hornPin, LOW);
         c.state = IDLE;
-        activeChannel = -1;
         char reply[64];
         snprintf(reply, sizeof(reply), "FAIL:%d:no_sound:%d", idx + 1, c.peakPiezo);
         sendReply(reply, c.replyIP, c.replyPort);
@@ -153,11 +177,28 @@ void updateChannel(int idx) {
     }
 
     case SOUNDING: {
-      int piezo = analogRead(PIEZO_PIN);
-      if (piezo > c.peakPiezo) c.peakPiezo = piezo;
+      if (c.useFeedback) {
+        int piezo = analogRead(PIEZO_PIN);
+        if (piezo > c.peakPiezo) c.peakPiezo = piezo;
 
-      c.actualSoundMs = millis() - c.soundStartTime;
-      if (c.actualSoundMs >= c.soundDuration) {
+        c.actualSoundMs = millis() - c.soundStartTime;
+      } else {
+        unsigned long elapsed = millis() - c.hornOnTime;
+        if (!c.powerReduced && elapsed >= c.boostMs) {
+          analogWrite(c.hornPin, c.hornPwm);
+          c.powerReduced = true;
+        }
+        c.actualSoundMs = elapsed > c.boostMs ? elapsed - c.boostMs : 0;
+      }
+
+      bool shouldStop = false;
+      if (c.useFeedback) {
+        shouldStop = c.actualSoundMs >= c.soundDuration;
+      } else {
+        unsigned long elapsedFromOn = millis() - c.hornOnTime;
+        shouldStop = elapsedFromOn >= (c.boostMs + c.soundDuration);
+      }
+      if (shouldStop) {
         digitalWrite(c.hornPin, LOW);
         c.soundStopTime = millis();
         c.state = TAIL;
@@ -167,15 +208,18 @@ void updateChannel(int idx) {
     }
 
     case TAIL: {
-      int piezo = analogRead(PIEZO_PIN);
-      if (piezo > c.peakPiezo) c.peakPiezo = piezo;
+      if (c.useFeedback) {
+        int piezo = analogRead(PIEZO_PIN);
+        if (piezo > c.peakPiezo) c.peakPiezo = piezo;
+      }
 
       if (millis() - c.soundStopTime >= TAIL_MS) {
         c.state = IDLE;
-        activeChannel = -1;
-        char reply[64];
-        snprintf(reply, sizeof(reply), "OK:%d:%d:%lu:%lu", idx + 1, c.peakPiezo, c.startupDelay, c.actualSoundMs);
-        sendReply(reply, c.replyIP, c.replyPort);
+        if (c.sendReply) {
+          char reply[64];
+          snprintf(reply, sizeof(reply), "OK:%d:%d:%lu:%lu", idx + 1, c.peakPiezo, c.startupDelay, c.actualSoundMs);
+          sendReply(reply, c.replyIP, c.replyPort);
+        }
         Serial.printf("Ch%d: Done. Peak=%d, delay=%lu, sound=%lu ms\n",
                        idx + 1, c.peakPiezo, c.startupDelay, c.actualSoundMs);
       }
@@ -184,7 +228,6 @@ void updateChannel(int idx) {
 
     case IDLE:
     default:
-      activeChannel = -1;
       break;
   }
 }
@@ -196,8 +239,8 @@ void handleCommand(const char* cmd, IPAddress remoteIP, uint16_t remotePort) {
     if (channel < 1 || channel > NUM_CHANNELS) return;
     int idx = channel - 1;
 
-    // Если другой канал уже активен — отклоняем
-    if (activeChannel >= 0 && activeChannel != idx) {
+    // Калибровка всегда эксклюзивна: только один активный канал на плате.
+    if (anyChannelActive()) {
       char reply[64];
       snprintf(reply, sizeof(reply), "FAIL:%d:busy", channel);
       sendReply(reply, remoteIP, remotePort);
@@ -214,15 +257,49 @@ void handleCommand(const char* cmd, IPAddress remoteIP, uint16_t remotePort) {
     }
 
     ch[idx].soundDuration = dur;
+    ch[idx].useFeedback = true;
+    ch[idx].sendReply = true;
+    ch[idx].powerReduced = false;
+    ch[idx].boostMs = 0;
     ch[idx].peakPiezo = 0;
     ch[idx].startupDelay = 0;
     ch[idx].actualSoundMs = 0;
     ch[idx].hornOnTime = millis();
     ch[idx].state = WAITING_SOUND;
-    activeChannel = idx;
-    analogWrite(ch[idx].hornPin, ch[idx].hornPwm);
+    analogWrite(ch[idx].hornPin, STARTUP_PWM);
 
     Serial.printf("Ch%d: Horn ON, target: %lu ms\n", channel, dur);
+
+  } else if (strncmp(cmd, "PLAY:", 5) == 0) {
+    // PLAY:ch:ms:boost — воспроизведение без пьезо/ответа, по таймеру.
+    int channel = 0;
+    unsigned long dur = DEFAULT_SOUND_MS;
+    unsigned long boost = 0;
+    int parsed = sscanf(cmd, "PLAY:%d:%lu:%lu", &channel, &dur, &boost);
+    if (parsed < 2) return;
+    if (channel < 1 || channel > NUM_CHANNELS) return;
+    if (dur < 20) dur = 20;
+    if (dur > 1000) dur = 1000;
+    if (boost > 1000) boost = 1000;
+    int idx = channel - 1;
+
+    // PLAY разрешаем параллельно по двум каналам, но не во время feedback-режима.
+    if (anyFeedbackActive()) return;
+
+    ch[idx].soundDuration = dur;
+    ch[idx].useFeedback = false;
+    ch[idx].sendReply = false;
+    ch[idx].powerReduced = false;
+    ch[idx].boostMs = boost;
+    ch[idx].peakPiezo = 0;
+    ch[idx].startupDelay = boost;
+    ch[idx].actualSoundMs = 0;
+    ch[idx].hornOnTime = millis();
+    ch[idx].soundStartTime = ch[idx].hornOnTime + boost;
+    ch[idx].state = SOUNDING;
+    analogWrite(ch[idx].hornPin, STARTUP_PWM);
+
+    Serial.printf("Ch%d: PLAY ON, dur=%lu, boost=%lu\n", channel, dur, boost);
 
   } else if (strcmp(cmd, "PING") == 0) {
     char reply[64];

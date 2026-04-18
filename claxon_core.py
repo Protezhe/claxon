@@ -112,11 +112,15 @@ def send_command(esp: EspDevice, command: str, timeout: float = RECV_TIMEOUT) ->
         sock.close()
 
 
-def fire_async(esp: EspDevice, channel: int, duration_ms: int):
-    """Отправляет FIRE без ожидания ответа (для MIDI playback)."""
+def fire_async(esp: EspDevice, channel: int, duration_ms: int, boost_ms: int | None = None):
+    """Отправляет команду без ожидания ответа (для MIDI playback)."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        cmd = f"FIRE:{channel}:{duration_ms}"
+        if boost_ms is None:
+            cmd = f"FIRE:{channel}:{duration_ms}"
+        else:
+            boost_ms = max(0, int(boost_ms))
+            cmd = f"PLAY:{channel}:{duration_ms}:{boost_ms}"
         sock.sendto(cmd.encode(), (esp.ip, esp.port))
     finally:
         sock.close()
@@ -240,6 +244,8 @@ class ClaxonSystem:
             "threshold": 50,
             "power": 100.0,
             "note": DEFAULT_NOTES[index] if index < len(DEFAULT_NOTES) else 0,
+            "startup_delay_ms": -1,
+            "play_comp_ms": 0,
         }
         saved = self.settings.get(key, {})
         defaults.update(saved)
@@ -300,7 +306,7 @@ class ClaxonSystem:
             duration_ms = self.get_claxon_config(index)["duration"]
         return fire(esp, channel, duration_ms)
 
-    def fire_async(self, index: int, duration_ms: int | None = None):
+    def fire_async(self, index: int, duration_ms: int | None = None, boost_ms: int | None = None):
         """Выстрелить без ожидания ответа (для MIDI)."""
         esp = self.get_esp_for_claxon(index)
         if not esp:
@@ -308,7 +314,7 @@ class ClaxonSystem:
         channel = self.get_channel_for_claxon(index)
         if duration_ms is None:
             duration_ms = self.get_claxon_config(index)["duration"]
-        fire_async(esp, channel, duration_ms)
+        fire_async(esp, channel, duration_ms, boost_ms=boost_ms)
 
     def fire_all(self) -> list[dict]:
         """Выстрелить всеми онлайн клаксонами."""
